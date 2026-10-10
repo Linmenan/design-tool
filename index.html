@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#fffdf9">
+<title>户型装修设计</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="css/app.css">
+<script type="importmap">
+{"imports":{
+  "three":"./vendor/three/build/three.module.js",
+  "three/addons/":"./vendor/three/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+<div class="app" id="app" data-stage="layout">
+  <header id="header"></header>
+
+  <aside class="lib" id="libPane"></aside>
+
+  <main id="stage">
+    <svg id="plan" class="tool-select" font-family="-apple-system,'PingFang SC','Microsoft YaHei',sans-serif">
+      <defs id="defs"></defs>
+      <g id="gGrid"></g>
+      <g id="gRooms"></g>
+      <g id="gFurn"></g>
+      <g id="gWalls"></g>
+      <g id="gOpen"></g>
+      <g id="gEdit"></g>
+      <g id="gLabels" pointer-events="none"></g>
+      <g id="gDims" pointer-events="none"></g>
+      <g id="gMeasure" pointer-events="none"></g>
+      <g id="gSel"></g>
+    </svg>
+
+    <div id="view3d">
+      <div id="walkOverlay"><div>
+        <h3>漫游模式</h3>
+        <p id="wo1">点击开始，从入户门进入</p>
+        <p id="wo2">WASD 移动 · 鼠标转向 · Shift 快走</p>
+        <p id="wo3">E 开关正前方的门 · Esc 暂停</p>
+      </div></div>
+      <div id="cross"></div>
+      <div id="joy"><i></i></div>
+      <button class="btn primary" id="walkExit"></button>
+      <div id="hint3d">左键旋转 · 右键平移 · 滚轮缩放 · 点门开关</div>
+    </div>
+
+    <div class="scalebar" id="scalebar"><span id="sbText">1 m</span><div class="bar" id="sbBar"></div></div>
+    <div class="modehint" id="modehint"></div>
+    <div id="fab"></div>
+    <div class="edit-hud" id="editHud"></div>
+    <div class="stage-badge" id="stageBadge"></div>
+  </main>
+
+  <aside class="right" id="propPane"></aside>
+
+  <footer id="footer">
+    <span class="only2d">X <b id="cx">—</b></span>
+    <span class="only2d">Y <b id="cy">—</b></span>
+    <span class="only2d"><span id="ratioLabel">当前比例</span> <b id="ratio">—</b></span>
+    <span id="hover" class="only2d"></span>
+    <span class="spacer"></span>
+    <span id="tip"></span>
+  </footer>
+</div>
+
+<div id="toast"></div>
+<input type="file" id="fileIn" accept=".json,.plan,.design,application/json" hidden>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
