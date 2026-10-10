@@ -638,6 +638,13 @@ export class PlanView {
       t = 'select';
       toast(tr('装修布置阶段不能编辑墙体，请先切到「户型编辑」', 'Switch to Plan Edit to modify walls'));
     }
+    // 工具变化时：清除未完成的测量（已保存的 measures 保留）
+    const changing = this.app.ui.tool !== t;
+    if (changing && (this.app.ui.mA || this.app.ui.mCur)){
+      this.app.ui.mA = null;
+      this.app.ui.mCur = null;
+      this.renderMeasure();
+    }
     this.app.ui.tool = t;
     this.svg.setAttribute('class', 'tool-' + t);
     // 光标样式（至少直观提示当前工具）
@@ -924,13 +931,13 @@ export class PlanView {
     const ed = this.editor;
     const kindZh = { n:'隔墙', b:'承重墙', e:'外墙', low:'矮墙' }[ed.wallKind] || '';
     const labels = {
-      'select':     tr('选择 · 拖动对象', 'Select'),
-      'draw-wall':  tr(`画墙 · ${kindZh} · 厚 ${ed.wallThickness}mm · Shift 锁定`, `Wall`),
-      'draw-room':  tr('画房间 · 拖动框选', 'Room'),
+      'select':     tr('选择 (Q) · 拖动对象', 'Select (Q)'),
+      'draw-wall':  tr(`画墙 (W) · ${kindZh} · 厚 ${ed.wallThickness}mm · Shift 锁定`, `Wall (W)`),
+      'draw-room':  tr('画房间 (E) · 拖动框选', 'Room (E)'),
       'auto-room':  tr('智能房间 · 点击识别', 'Smart room'),
-      'measure':    tr('测量 · 点两点 · Shift 锁定正交', 'Measure'),
-      'add-door':   tr('开门 · 在墙上点一下', 'Door'),
-      'add-window': tr('开窗 · 在墙上点一下', 'Window'),
+      'measure':    tr('测量 (D) · 点两点 · Shift 锁定正交', 'Measure (D)'),
+      'add-door':   tr('开门 (R) · 在墙上点一下', 'Door (R)'),
+      'add-window': tr('开窗 (R) · 在墙上点一下', 'Window (R)'),
       'demolish':   tr('拆墙 · 在墙上点一下，可拖动改宽', 'Demolish'),
     };
     const txt = labels[t];

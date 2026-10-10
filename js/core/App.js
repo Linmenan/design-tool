@@ -291,17 +291,16 @@ export class App {
         return;
       }
 
-      /* 编辑阶段单键快捷键：V 选择 / W 画墙 / R 画房间 / M 测量 / D 开门窗 / N 开窗 / Esc 取消 */
+      /* 编辑阶段单键快捷键：Q 选择 / W 画墙 / E 画房间 / R 门窗 / D 测量 / Esc 取消 */
       if (this.stage?.current !== 'edit') return;
       if (e.altKey || e.metaKey || e.ctrlKey) return;
 
       const map = {
-        v: 'select',
+        q: 'select',
         w: 'draw-wall',
-        r: 'draw-room',
-        m: 'measure',
-        d: 'add-door',
-        n: 'add-window',
+        e: 'draw-room',
+        r: 'add-door',
+        d: 'measure',
         escape: 'select',
       };
       const tool = map[k];
@@ -340,13 +339,13 @@ export class App {
         { label: tr('开窗','Window'), action: () => this.setTool('add-window') },
       ];
     }
-    /* 其余一级菜单 */
+    /* 其余一级菜单（顺序与快捷键一致：Q W E R D） */
     return [
-      { label: tr('选择','Select'),      action: () => this.setTool('select') },
-      { label: tr('画墙','Draw wall'),   action: () => this.setTool('draw-wall') },
-      { label: tr('画房间','Draw room'), action: () => this.setTool('draw-room') },
-      { label: tr('测量','Measure'),     action: () => this.setTool('measure') },
-      { label: tr('开门窗','Door/Win'),  action: () => this.setTool('add-door') },
+      { label: tr('选择 (Q)','Select (Q)'),         action: () => this.setTool('select') },
+      { label: tr('画墙 (W)','Draw wall (W)'),      action: () => this.setTool('draw-wall') },
+      { label: tr('画房间 (E)','Draw room (E)'),    action: () => this.setTool('draw-room') },
+      { label: tr('门窗 (R)','Door / Window (R)'),  action: () => this.setTool('add-door') },
+      { label: tr('测量 (D)','Measure (D)'),        action: () => this.setTool('measure') },
     ];
   }
 
