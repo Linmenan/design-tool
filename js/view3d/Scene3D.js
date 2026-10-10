@@ -113,7 +113,8 @@ export class Scene3D {
       // 只把「短按 + 未拖动」当作点击（避免和 OrbitControls 冲突）
       if (dt > 400 || dist > 5) return;
       const h = this._pick(e);
-      if (h?.door && h.dist < 8){
+      // 只对门做开合切换；距离不再做硬阈值限制（用户可能站得很远）
+      if (h?.door){
         h.door.open = !h.door.open;
       }
     });
@@ -589,13 +590,14 @@ export class Scene3D {
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ptr, this.camera);
 
-    // 3D 场景本身只用于浏览，不做硬装编辑；拾取只保留家具（供未来 3D 拖动预留）
-    const targets = [this.furnG];
+    // 家具 + 建筑上部（含墙、门、窗、玻璃）都参与拾取；
+    // 具体命中什么由 userData 过滤决定，未注册 userData 的对象会被跳过。
+    const targets = [this.furnG, this.archUp];
     const hits = ray.intersectObjects(targets, true);
     for (const h of hits){
       // 跳过玻璃（透明，不挡视线）
       if (h.object.material === this.glassMat) continue;
-      // 从命中对象往上找 userData
+      // 从命中对象往上找 userData（door / fid / room）
       let o = h.object;
       while (o && !o.userData.door && !o.userData.fid && !o.userData.room && o !== this.scene){
         o = o.parent;
@@ -668,8 +670,8 @@ export class Scene3D {
     const h = $('#hint3d');
     if (!h) return;
     h.textContent = tr(
-      '左键旋转 · 右键平移 · 滚轮缩放 · 点击门开关',
-      'Left-drag orbits · scroll zooms · click doors to open'
+      '左键旋转 · 右键平移 · 滚轮缩放 · 单击门板开关门',
+      'Left-drag orbits · scroll zooms · click a door leaf to open/close'
     );
   }
   relang(){ this._syncHint(); }
