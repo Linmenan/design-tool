@@ -30,6 +30,9 @@ export class Scene3D {
     this.keys = {};
     this.clock = null;
     this.doors = [];       // 每次 buildArch 后重建，每个元素 { pivot, a0, a1, cur, open }
+    this.walk = null;      // 漫游状态：{ x, z, y, yaw, pitch, speed, runMul, locked }
+    this._joy = null;      // 触屏摇杆输入：{ x, y }（-1..1）
+    this._walkOverlay = null;
   }
 
   /* ---------- 坐标换算 ---------- */
@@ -112,6 +115,7 @@ export class Scene3D {
       downAt = null;
       // 只把「短按 + 未拖动」当作点击（避免和 OrbitControls 冲突）
       if (dt > 400 || dist > 5) return;
+      if (this.walk) return;      // 漫游模式：开门交给 E 键
       const h = this._pick(e);
       // 只对门做开合切换；距离不再做硬阈值限制（用户可能站得很远）
       if (h?.door){
@@ -127,6 +131,130 @@ export class Scene3D {
     }).observe(stage);
 
     this._applyLight();
+    this._bindWalkEvents();
+  }
+
+  /* ---------- 漫游事件绑定（键盘 / 鼠标 / 触屏 / 指针锁定） ---------- */
+  _bindWalkEvents(){
+    const cv = this.renderer.domElement;
+
+    /* --- 键盘：WASD 移动、Shift 快走、E 开门、Esc 退出 --- */
+    document.addEventListener('keydown', e => {
+      const k = e.key.toLowerCase();
+      this.keys[k] = true;
+      if (e.shiftKey) this.keys['shift'] = true;
+      if (!this.walk) return;
+      if (k === 'escape'){ this.exitWalk(); return; }
+      if (k === 'e'){ this._toggleDoorAhead(); e.preventDefault(); }
+    });
+    document.addEventListener('keyup', e => {
+      this.keys[e.key.toLowerCase()] = false;
+      if (!e.shiftKey) this.keys['shift'] = false;
+    });
+
+    /* --- 指针锁定：进入漫游后请求，锁定后鼠标直接转向 --- */
+    document.addEventListener('pointerlockchange', () => {
+      if (!this.walk) return;
+      const locked = document.pointerLockElement === cv;
+      this.walk.locked = locked;
+      if (!locked){
+        // 用户按 Esc 退出指针锁定 → 同时退出漫游
+        this.exitWalk();
+      }
+    });
+    document.addEventListener('mousemove', e => {
+      if (!this.walk || !this.walk.locked) return;
+      this.walk.yaw   -= e.movementX * 0.0022;
+      this.walk.pitch -= e.movementY * 0.0022;
+      const lim = Math.PI / 2 - 0.05;
+      this.walk.pitch = Math.max(-lim, Math.min(lim, this.walk.pitch));
+      this._applyWalkCam();
+    });
+
+    /* --- 回退：未锁定指针时按住左键拖动转向 --- */
+    let drag = null;
+    cv.addEventListener('mousedown', e => {
+      if (!this.walk || this.walk.locked) return;
+      if (e.button !== 0) return;
+      drag = { x: e.clientX, y: e.clientY };
+    });
+    document.addEventListener('mousemove', e => {
+      if (!drag || !this.walk || this.walk.locked) return;
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+      drag.x = e.clientX; drag.y = e.clientY;
+      this.walk.yaw   -= dx * 0.005;
+      this.walk.pitch -= dy * 0.005;
+      const lim = Math.PI / 2 - 0.05;
+      this.walk.pitch = Math.max(-lim, Math.min(lim, this.walk.pitch));
+      this._applyWalkCam();
+    });
+    document.addEventListener('mouseup', () => { drag = null; });
+
+    /* --- 触屏：摇杆移动 + 画布拖动转向 --- */
+    const joy = document.getElementById('joy');
+    if (joy){
+      let joyId = null, cx = 0, cy = 0;
+      const apply = e => {
+        if (!this._joy) return;
+        const R = 55;
+        const dx = e.clientX - cx, dy = e.clientY - cy;
+        const dist = Math.hypot(dx, dy);
+        const k = dist > R ? R / dist : 1;
+        const x = dx * k, y = dy * k;
+        const knob = joy.querySelector('i');
+        if (knob) knob.style.transform = `translate(${x}px,${y}px)`;
+        this._joy = { x: x / R, y: -y / R };
+      };
+      joy.addEventListener('pointerdown', e => {
+        if (!this.walk) return;
+        joyId = e.pointerId;
+        joy.setPointerCapture(joyId);
+        const r = joy.getBoundingClientRect();
+        cx = r.left + r.width / 2;
+        cy = r.top + r.height / 2;
+        this._joy = { x: 0, y: 0 };
+        apply(e);
+        e.preventDefault();
+      });
+      joy.addEventListener('pointermove', e => {
+        if (e.pointerId !== joyId) return;
+        apply(e);
+        e.preventDefault();
+      });
+      const jEnd = e => {
+        if (e.pointerId !== joyId) return;
+        joyId = null;
+        this._joy = null;
+        const knob = joy.querySelector('i');
+        if (knob) knob.style.transform = '';
+      };
+      joy.addEventListener('pointerup', jEnd);
+      joy.addEventListener('pointercancel', jEnd);
+    }
+
+    let touchLook = null;
+    cv.addEventListener('pointerdown', e => {
+      if (!this.walk || e.pointerType === 'mouse') return;
+      touchLook = { id: e.pointerId, x: e.clientX, y: e.clientY };
+    });
+    cv.addEventListener('pointermove', e => {
+      if (!this.walk || !touchLook || e.pointerId !== touchLook.id) return;
+      const dx = e.clientX - touchLook.x, dy = e.clientY - touchLook.y;
+      touchLook.x = e.clientX; touchLook.y = e.clientY;
+      this.walk.yaw   -= dx * 0.005;
+      this.walk.pitch -= dy * 0.005;
+      const lim = Math.PI / 2 - 0.05;
+      this.walk.pitch = Math.max(-lim, Math.min(lim, this.walk.pitch));
+      this._applyWalkCam();
+    });
+    cv.addEventListener('pointerup', e => {
+      if (touchLook && e.pointerId === touchLook.id) touchLook = null;
+    });
+    cv.addEventListener('pointercancel', () => { touchLook = null; });
+
+    /* --- 退出按钮 --- */
+    const exit = document.getElementById('walkExit');
+    if (exit) exit.addEventListener('click', () => this.exitWalk());
   }
 
   /* ---------- 清理 ---------- */
@@ -919,9 +1047,13 @@ export class Scene3D {
   _startLoop(){
     if (this.raf) return;
     this.clock = new THREE.Clock();
+    this._lastT = performance.now();
     const loop = () => {
       this.raf = requestAnimationFrame(loop);
       const now = performance.now();
+      const dt = Math.min((now - this._lastT) / 1000, .05);
+      this._lastT = now;
+
       if (this.anim){
         const t = clamp01((now - this.anim.t0) / this.anim.dur);
         this.anim.fn(t);
@@ -930,13 +1062,14 @@ export class Scene3D {
         const t = clamp01((now - this.fly.t0) / this.fly.dur);
         this._camTween(this.fly.A, this.fly.B, ease(t));
         if (t >= 1) this.fly = null;
+      } else if (this.walk){
+        this._walkStep(dt);
       } else if (this.opt.mode === 'orbit'){
         this.orbit.update();
       }
 
       // ---- 门开合插值 ----
       if (this.doors.length){
-        const dt = Math.min(this.clock.getDelta ? this.clock.getDelta() : .016, .05);
         this.doors.forEach(d => {
           const tg = d.open ? d.a1 : d.a0;
           d.cur += (tg - d.cur) * Math.min(1, dt * 6);
@@ -999,6 +1132,15 @@ export class Scene3D {
   /* ---------- 工具栏接口 ---------- */
   setMode(m){
     if (this.anim) return;
+    if (m === 'walk'){
+      // 先弹遮罩，用户点击后再真正进入漫游
+      this._showWalkOverlay();
+      document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === 'walk'));
+      return;
+    }
+    // 回到鸟瞰 / 斜视
+    this._hideWalkOverlay();
+    if (this.walk) this.exitWalk(true);
     this.opt.mode = m;
     document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
     this.orbit.enabled = (m === 'orbit');
@@ -1039,10 +1181,17 @@ export class Scene3D {
   _syncHint(){
     const h = $('#hint3d');
     if (!h) return;
-    h.textContent = tr(
-      '左键旋转 · 右键平移 · 滚轮缩放 · 单击门板开关门',
-      'Left-drag orbits · scroll zooms · click a door leaf to open/close'
-    );
+    if (this.walk){
+      h.textContent = tr(
+        'WASD 移动 · 鼠标转向 · Shift 快走 · E 开门 · Esc 退出',
+        'WASD move · mouse look · Shift run · E door · Esc exit'
+      );
+    } else {
+      h.textContent = tr(
+        '左键旋转 · 右键平移 · 滚轮缩放 · 单击门板开关门',
+        'Left-drag orbits · scroll zooms · click a door leaf to open/close'
+      );
+    }
   }
   relang(){ this._syncHint(); }
   shot(){
@@ -1051,7 +1200,228 @@ export class Scene3D {
     a.href = this.renderer.domElement.toDataURL('image/png');
     a.click();
   }
-  walking(){ return false; }
+  walking(){ return this.walk != null; }
+
+  /* ============================================================
+   *  漫游模式
+   * ============================================================ */
+
+  /** 显示「点击开始」遮罩 */
+  _showWalkOverlay(){
+    const ov = document.getElementById('walkOverlay');
+    if (!ov){ this.enterWalk(); return; }
+    const w1 = document.getElementById('wo1');
+    const w2 = document.getElementById('wo2');
+    const w3 = document.getElementById('wo3');
+    if (w1) w1.textContent = tr('点击开始，从入户门进入', 'Click to start from the entry door');
+    if (w2) w2.textContent = tr('WASD 移动 · 鼠标转向 · Shift 快走', 'WASD to move · mouse to look · Shift to run');
+    if (w3) w3.textContent = tr('E 开关正前方的门 · Esc 退出漫游', 'E toggles the door ahead · Esc exits');
+    ov.style.display = 'flex';
+    ov.onclick = () => { ov.style.display = 'none'; this.enterWalk(); };
+  }
+  _hideWalkOverlay(){
+    const ov = document.getElementById('walkOverlay');
+    if (ov) ov.style.display = 'none';
+  }
+
+  /** 进入漫游 */
+  enterWalk(){
+    if (!this.active) return;
+    const plan = this.app.store.state.plan;
+    const doors = plan.doors || [];
+    const entry = doors.find(d => d.entry) || doors[0];
+
+    let px, pz, yaw;
+    if (entry){
+      const cx = (entry.x0 + entry.x1) / 2;
+      const cy = (entry.y0 + entry.y1) / 2;
+      const dx = entry.x1 - entry.x0, dy = entry.y1 - entry.y0;
+      const L = Math.hypot(dx, dy) || 1;
+      const ux = dx / L, uy = dy / L;
+      const nx = -uy, ny = ux;
+      const sgn = entry.swing === 'out' ? -1 : 1;
+      const oX = nx * sgn, oY = ny * sgn;   // 开门方向（世界 mm）
+      // 站在门外侧 0.9m
+      px = this.wx(cx - oX * 900);
+      pz = this.wz(cy - oY * 900);
+      // 看向门内（对齐 oDir 方向）
+      yaw = Math.atan2(-oX, -oY);
+    } else {
+      const b = plan.bounds || { x:-4000, y:-4000, w:14000, h:12000 };
+      px = this.wx(b.x + b.w / 2);
+      pz = this.wz(b.y + b.h / 2) + 3;
+      yaw = 0;
+    }
+
+    this.anim = null;
+    this.fly = null;
+    this.walk = { x:px, z:pz, y:1.6, yaw, pitch:0, speed:2.4, runMul:1.8, locked:false };
+    this.opt.mode = 'walk';
+    this.orbit.enabled = false;
+    this._applyWalkCam();
+
+    // UI
+    const cross = document.getElementById('cross');
+    if (cross) cross.style.display = 'block';
+    const joy = document.getElementById('joy');
+    if (joy && matchMedia('(pointer:coarse)').matches) joy.style.display = 'block';
+    const we = document.getElementById('walkExit');
+    if (we){ we.style.display = 'block'; we.textContent = tr('退出漫游', 'Exit walk'); }
+    document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === 'walk'));
+
+    // 尝试指针锁定（失败也允许按住左键拖动）
+    try {
+      const p = this.renderer.domElement.requestPointerLock?.();
+      if (p && p.catch) p.catch(() => {});
+    } catch {}
+
+    this._syncHint();
+  }
+
+  /** 退出漫游；silent=true 时不飞回鸟瞰（用于切到其他模式） */
+  exitWalk(silent){
+    if (!this.walk) return;
+    this.walk = null;
+    this._joy = null;
+    if (document.pointerLockElement) document.exitPointerLock?.();
+
+    const cross = document.getElementById('cross');
+    if (cross) cross.style.display = 'none';
+    const joy = document.getElementById('joy');
+    if (joy) joy.style.display = 'none';
+    const we = document.getElementById('walkExit');
+    if (we) we.style.display = 'none';
+
+    this.opt.mode = 'orbit';
+    this.orbit.enabled = true;
+    document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === 'orbit'));
+
+    if (!silent){
+      this.flyTo(this._isoWhole(), 700);
+      toast(tr('已退出漫游', 'Exited walk mode'));
+    }
+    this._syncHint();
+  }
+
+  /** 把 walk 状态同步到相机 */
+  _applyWalkCam(){
+    const w = this.walk;
+    if (!w) return;
+    this.camera.position.set(w.x, w.y, w.z);
+    const cy = Math.cos(w.yaw), sy = Math.sin(w.yaw);
+    const cp = Math.cos(w.pitch), sp = Math.sin(w.pitch);
+    const dir = new THREE.Vector3(-sy * cp, sp, -cy * cp);
+    this.camera.lookAt(w.x + dir.x, w.y + dir.y, w.z + dir.z);
+  }
+
+  /** 每帧：根据按键 / 摇杆推进位置 */
+  _walkStep(dt){
+    const w = this.walk;
+    if (!w) return;
+    const keys = this.keys;
+    let fwd = 0, side = 0;
+    if (keys['w'] || keys['arrowup'])    fwd += 1;
+    if (keys['s'] || keys['arrowdown'])  fwd -= 1;
+    if (keys['a'] || keys['arrowleft'])  side -= 1;
+    if (keys['d'] || keys['arrowright']) side += 1;
+    if (this._joy){
+      fwd  += this._joy.y;
+      side += this._joy.x;
+    }
+
+    if (fwd || side){
+      const len = Math.hypot(fwd, side) || 1;
+      fwd /= len; side /= len;
+      const sp = w.speed * (keys['shift'] ? w.runMul : 1) * dt;
+      const cy = Math.cos(w.yaw), sy = Math.sin(w.yaw);
+      const fx = -sy, fz = -cy;     // 前向
+      const rx =  cy, rz = -sy;     // 右向（forward × up）
+      w.x += (fx * fwd + rx * side) * sp;
+      w.z += (fz * fwd + rz * side) * sp;
+      this._walkCollide();
+    }
+    this._applyWalkCam();
+  }
+
+  /** 圆柱推离式墙碰撞：门洞 / 拆除段允许通过 */
+  _walkCollide(){
+    const w = this.walk;
+    if (!w) return;
+    const { plan, layout } = this.app.store.state;
+    const R = 0.28;                                   // 玩家半径（米）
+    const walls = plan.walls || [];
+    const doors = plan.doors || [];
+    const dem   = layout.demolished || [];
+    const dems  = layout.demolitions || [];
+
+    /** 玩家是否位于「某门 / 拆除段」的开口内 */
+    const passThrough = (px, pz, wallId) => {
+      const chk = el => {
+        if (el.hostWall && el.hostWall !== wallId) return false;
+        const d0x = this.wx(el.x0), d0z = this.wz(el.y0);
+        const d1x = this.wx(el.x1), d1z = this.wz(el.y1);
+        const ddx = d1x - d0x, ddz = d1z - d0z;
+        const L2d = ddx * ddx + ddz * ddz || 1;
+        const tt = ((px - d0x) * ddx + (pz - d0z) * ddz) / L2d;
+        if (tt < 0 || tt > 1) return false;
+        const qx = d0x + tt * ddx, qz = d0z + tt * ddz;
+        return Math.hypot(px - qx, pz - qz) < R + 0.15;
+      };
+      for (const d of doors) if (chk(d)) return true;
+      for (const dm of dems) if (chk(dm)) return true;
+      return false;
+    };
+
+    for (let iter = 0; iter < 3; iter++){
+      let moved = false;
+      for (const wall of walls){
+        if (dem.includes(wall.id)) continue;
+        const half = (wall.t || 240) / 2000;
+        const collR = half + R;
+        const x0 = this.wx(wall.x0), z0 = this.wz(wall.y0);
+        const x1 = this.wx(wall.x1), z1 = this.wz(wall.y1);
+        const dx = x1 - x0, dz = z1 - z0;
+        const L2 = dx * dx + dz * dz || 1;
+        let t = ((w.x - x0) * dx + (w.z - z0) * dz) / L2;
+        t = Math.max(0, Math.min(1, t));
+        const cx = x0 + t * dx, cz = z0 + t * dz;
+        const ddx = w.x - cx, ddz = w.z - cz;
+        const dist = Math.hypot(ddx, ddz);
+        if (dist < collR){
+          if (passThrough(w.x, w.z, wall.id)) continue;
+          const push = (collR - dist) + 1e-4;
+          if (dist < 1e-4){
+            const invL = 1 / Math.sqrt(L2);
+            w.x += -dz * invL * push;
+            w.z +=  dx * invL * push;
+          } else {
+            w.x += ddx / dist * push;
+            w.z += ddz / dist * push;
+          }
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+  }
+
+  /** E 键：开关正前方 2.2m 内的门 */
+  _toggleDoorAhead(){
+    const w = this.walk;
+    if (!w || !this.doors.length) return;
+    const origin = new THREE.Vector3(w.x, w.y, w.z);
+    const dir = new THREE.Vector3(-Math.sin(w.yaw), 0, -Math.cos(w.yaw));
+    const ray = new THREE.Raycaster(origin, dir, 0, 2.2);
+    const hits = ray.intersectObjects(this.doors.map(d => d.pivot), true);
+    if (!hits.length) return;
+    let o = hits[0].object;
+    while (o && !o.userData.door && o !== this.scene) o = o.parent;
+    if (o?.userData?.door){
+      const d = o.userData.door;
+      d.open = !d.open;
+      toast(d.open ? tr('开门', 'Opened') : tr('关门', 'Closed'));
+    }
+  }
 }
 
 export default Scene3D;
