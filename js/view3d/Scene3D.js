@@ -31,7 +31,7 @@ const TEX = {
 export class Scene3D {
   constructor(app){
     this.app = app;
-    this.opt = { cut: H, furn: true, labels: true, night: false, hour: 10, mode: 'orbit' };
+    this.opt = { cut: H, furn: true, labels: true, night: false, hour: 10, month: 6, day: 21, mode: 'orbit' };
     this.active = false;
     this.inited = false;
     this.anim = null;
@@ -1542,13 +1542,23 @@ export class Scene3D {
 
   _applyLight(){
     const hour = this.opt.hour;
+    const month = Math.max(1, Math.min(12, +this.opt.month || 6));
+    const day   = Math.max(1, Math.min(31, +this.opt.day   || 21));
     const compass = (this.app.store.state.plan && this.app.store.state.plan.compass)
       || { north: 0, lat: 39.9, lng: 116.4 };
     const lat = Math.max(-89, Math.min(89, +compass.lat || 39.9));
     const northDeg = ((+compass.north || 0) % 360 + 360) % 360;
 
-    /* 简化天文模型：赤纬用 6 月 21 日近似（用户可只调"日照时间"滑块） */
-    const δ = 23.45 * Math.PI / 180 * Math.sin(2 * Math.PI * (284 + 172) / 365);
+    /* 年积日 → 太阳赤纬（Spencer 近似，误差 < 0.5°） */
+    const mdLen = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let N = day;
+    for (let i = 0; i < month - 1; i++) N += mdLen[i];
+    const γ = 2 * Math.PI * (N - 1) / 365;
+    const δ = 0.006918
+            - 0.399912 * Math.cos(γ)     + 0.070257 * Math.sin(γ)
+            - 0.006758 * Math.cos(2 * γ) + 0.000907 * Math.sin(2 * γ)
+            - 0.002697 * Math.cos(3 * γ) + 0.00148  * Math.sin(3 * γ);
+
     const φ = lat * Math.PI / 180;
     const ω = (hour - 12) * 15 * Math.PI / 180;                 // 时角
     const sinAlt = Math.sin(φ) * Math.sin(δ) + Math.cos(φ) * Math.cos(δ) * Math.cos(ω);
@@ -1572,8 +1582,8 @@ export class Scene3D {
     const above = Math.max(0, Math.sin(alt));                    // 0（夜晚）~ 1（正午）
     const warm = 1 - Math.min(1, above * 2);
     this.sun.color.setHSL(.09, .35 + warm * .4, .95 - warm * .12);
-    this.sun.intensity = this.opt.night ? .05 : (.4 + above * 2.6);
-    this.hemi.intensity = this.opt.night ? .12 : (.55 + above * .5);
+    this.sun.intensity = this.opt.night ? .05 : (.15 + above * 2.9);
+    this.hemi.intensity = this.opt.night ? .12 : (.35 + above * .65);
     this.scene.background = new THREE.Color(this.opt.night ? 0x1c2130 : 0xf7f4ee);
     this.ground.material.color.set(this.opt.night ? 0x2a2e38 : 0xf2eee7);
 
@@ -1774,7 +1784,12 @@ export class Scene3D {
     if (key === 'furn') this.furnG.visible = this.opt.furn;
     if (key === 'night') this._applyLight();
   }
-  setHour(v){ this.opt.hour = v; this._applyLight(); }
+  setHour(v){ this.opt.hour = Math.max(0, Math.min(24, +v || 0)); this._applyLight(); }
+  setDate(m, d){
+    if (m != null) this.opt.month = Math.max(1, Math.min(12, +m || 6));
+    if (d != null) this.opt.day   = Math.max(1, Math.min(31, +d || 21));
+    this._applyLight();
+  }
   goIso(){ if (this.anim) return; this.flyTo(this._isoWhole()); }
   goTop(){ if (this.anim) return; this.flyTo(this._topWhole()); }
   flyToRoom(id){

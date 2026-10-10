@@ -506,7 +506,7 @@ export class PlanView {
     $('#gMeasure').innerHTML = s;
   }
 
-  /* ---- 2D 罗盘：北向与经纬度 ---- */
+  /* ---- 2D 罗盘：北向与经纬度；指针可拖拽旋转，N 显示在指针上 ---- */
   renderCompass(){
     const el = document.getElementById('compass2d');
     if (!el) return;
@@ -519,16 +519,59 @@ export class PlanView {
       <circle cx="0" cy="0" r="46" fill="rgba(255,253,249,.94)" stroke="#d9d0c1" stroke-width="1.5"/>
       <line x1="-9" y1="0" x2="9" y2="0" stroke="#c9c0b1" stroke-width=".8"/>
       <line x1="0" y1="-9" x2="0" y2="9" stroke="#c9c0b1" stroke-width=".8"/>
-      <g transform="rotate(${north})">
-        <polygon points="0,-36 7,-4 0,6 -7,-4" fill="#b5653a" stroke="#8a3d1f" stroke-width=".5"/>
-        <polygon points="0,36 7,4 0,-6 -7,4" fill="#8a8174" stroke="#5a5248" stroke-width=".5"/>
+      <g class="cmp-needle" transform="rotate(${north})" style="cursor:grab">
+        <polygon points="0,-34 7,-4 0,6 -7,-4" fill="#b5653a" stroke="#8a3d1f" stroke-width=".5"/>
+        <polygon points="0,34 7,4 0,-6 -7,4" fill="#8a8174" stroke="#5a5248" stroke-width=".5"/>
+        <text x="0" y="-38" text-anchor="middle" font-size="11" font-weight="700" fill="#b5653a"
+          stroke="#fffdf9" stroke-width="2" paint-order="stroke" style="pointer-events:none">N</text>
       </g>
-      <text x="0" y="-39" text-anchor="middle" font-size="10" font-weight="700" fill="#b5653a">N</text>
-      <circle cx="0" cy="0" r="2.5" fill="#2b2824"/>
-      <text x="0" y="43" text-anchor="middle" font-size="6" fill="#7d7366">${esc(coord)}</text>
+      <circle cx="0" cy="0" r="2.5" fill="#2b2824" style="pointer-events:none"/>
+      <text x="0" y="43" text-anchor="middle" font-size="6" fill="#7d7366" style="pointer-events:none">${esc(coord)}</text>
     </svg>`;
-    el.title = tr(`北向 ${north}° · 纬度 ${lat}° · 经度 ${lng}°（点击设置）`, `North ${north}° · Lat ${lat}° · Lng ${lng}° (click to set)`);
-    el.onclick = () => this.app.select({ kind: 'compass' });
+    el.title = tr(`北向 ${north}° · 纬度 ${lat}° · 经度 ${lng}°（拖拽指针旋转 / 点击设置）`,
+                 `North ${north}° · Lat ${lat}° · Lng ${lng}° (drag needle to rotate / click to edit)`);
+
+    /* 单击空白（非指针）→ 打开罗盘面板 */
+    el.onclick = e => {
+      if (e.target.closest && e.target.closest('.cmp-needle')) return;
+      this.app.select({ kind: 'compass' });
+    };
+
+    /* 拖拽指针 → 旋转北向（onpointerdown 每次渲染覆盖，避免监听器累积） */
+    el.onpointerdown = e => {
+      const needle = e.target.closest && e.target.closest('.cmp-needle');
+      if (!needle) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      needle.style.cursor = 'grabbing';
+      let pending = null;
+      const onMove = ev => {
+        const dx = ev.clientX - cx, dy = ev.clientY - cy;
+        // 屏幕上方（12 点）为 0°，顺时针为正
+        let deg = Math.atan2(dx, -dy) * 180 / Math.PI;
+        deg = ((deg % 360) + 360) % 360;
+        pending = Math.round(deg);
+        needle.setAttribute('transform', `rotate(${pending})`);
+      };
+      const onUp = () => {
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        window.removeEventListener('pointercancel', onUp);
+        needle.style.cursor = '';
+        if (pending != null){
+          const v = pending;
+          this.app.store.mutate('rotate compass', s => {
+            s.plan.compass = { ...(s.plan.compass || {}), north: v };
+          });
+        }
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+      window.addEventListener('pointercancel', onUp);
+    };
   }
 
   /* ---- 选中高亮 + 控制点 ---- */

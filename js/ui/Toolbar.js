@@ -78,7 +78,19 @@ export class Toolbar {
         <button class="btn chip on" data-t="labels">${tr('房间名','Labels')}</button>
         <button class="btn chip" data-t="night">${tr('夜景','Night')}</button>
       </div>
-      <div class="grp only3d"><label class="range"><span>${tr('日照','Sun')}</span> <input type="range" id="sun" min="7" max="18" step=".25" value="10" style="width:84px"><span id="sunT">10:00</span></label></div>
+      <div class="grp only3d" id="sunCfg">
+        <label class="range" title="${tr('月 / 日','Month / Day')}">
+          <span>${tr('日期','Date')}</span>
+          <input type="number" id="month" min="1" max="12" step="1" value="6" style="width:46px;text-align:center">
+          <span>/</span>
+          <input type="number" id="day" min="1" max="31" step="1" value="21" style="width:46px;text-align:center">
+        </label>
+        <label class="range" title="${tr('时刻','Time of day')}">
+          <span>${tr('时刻','Time')}</span>
+          <input type="range" id="sun" min="0" max="24" step=".25" value="10" style="width:84px">
+          <span id="sunT">10:00</span>
+        </label>
+      </div>
       <div class="spacer"></div>
       ${this._langHTML()}
       <button class="btn" id="fullscreen" style="border:1px solid var(--line);background:#fff">⛶ ${tr('全屏','Fullscreen')}</button>
@@ -203,7 +215,9 @@ export class Toolbar {
     $$('#modes3d .btn').forEach(b => b.onclick = () => app.view3d?.setMode(b.dataset.mode));
     $$('[data-cut]').forEach(b => b.onclick = () => app.view3d?.setCut(+b.dataset.cut));
     $$('#toggles3d .btn').forEach(b => b.onclick = () => app.view3d?.toggle(b.dataset.t, b));
-    $('#sun') && ($('#sun').oninput = e => app.view3d?.setHour(+e.target.value));
+    $('#sun')   && ($('#sun').oninput   = e => app.view3d?.setHour(+e.target.value));
+    $('#month') && ($('#month').oninput = e => app.view3d?.setDate(+e.target.value, undefined));
+    $('#day')   && ($('#day').oninput   = e => app.view3d?.setDate(undefined, +e.target.value));
     $('#vIso') && ($('#vIso').onclick = () => app.view3d?.goIso());
     $('#vTop') && ($('#vTop').onclick = () => app.view3d?.goTop());
 
