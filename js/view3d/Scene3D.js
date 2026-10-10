@@ -1604,6 +1604,13 @@ export class Scene3D {
 
   /* ---------- 家具 ---------- */
   buildFurn(){
+    /* 清空随机数缓存：_rng() 返回的是有状态的闭包，不清空的话，
+       第二次重建时同一 seed 的生成器会从上次的位置继续推进，
+       导致书架上的书本、绿植叶片等随机摆件"换了一批"。
+       清空后每件家具的随机序列都从同一个 seed 初值重新开始，
+       摆件位置 / 数量稳定不变。 */
+    this._rngCache.clear();
+
     /* 清理旧灯（含 SpotLight 目标） */
     (this.lamps || []).forEach(entry => {
       (entry.targets || []).forEach(t => this.scene.remove(t));
@@ -1863,12 +1870,75 @@ export class Scene3D {
     this.labelG.children.forEach(o => { o.visible = !!this.opt.labels; });
   }
 
+  /**
+   * 增量同步：把"数据变化类型"分成三类，各自独立处理：
+   *   1. 建筑（墙 / 门 / 窗 / 房间 / 地面 / cut） → buildArch()
+   *   2. 家具几何（type / cx / cy / w / d / rot / color）→ buildFurn()
+   *      否则只更新灯具光照（亮度 / 颜色 / 开关），不重建家具，
+   *      这样书架上的书本、绿植叶片等随机摆件就不会变化。
+   *   3. 房间名 / labels 开关 → buildLabels()
+   */
   sync(force){
     if (!this.inited) return;
     if (!this.active && !force) return;
-    this.buildArch();
-    this.buildFurn();
-    this.buildLabels();
+
+    const s = this.app.store.state;
+
+    /* ---- 1. 建筑摘要 ---- */
+    const archSum = JSON.stringify([
+      s.plan.walls, s.plan.doors, s.plan.windows, s.plan.slides,
+      s.plan.rooms, s.plan.mats,
+      s.layout.demolished, s.layout.demolitions,
+      this.opt.cut,
+    ]);
+    if (force || archSum !== this._archSum){
+      this._archSum = archSum;
+      this.buildArch();
+    }
+
+    /* ---- 2. 家具几何摘要（不含 lamp 字段）---- */
+    const furn = s.layout.furniture || [];
+    const geoSum = furn.map(f =>
+      `${f.id}|${f.type}|${f.cx}|${f.cy}|${f.w}|${f.d}|${f.rot}|${f.color}`
+    ).join(';');
+    if (force || geoSum !== this._furnGeoSum){
+      this._furnGeoSum = geoSum;
+      this.buildFurn();
+    } else {
+      /* 家具几何没变 → 只刷新灯具光照参数（颜色 / 强度 / 开关） */
+      this._refreshLamps();
+    }
+
+    /* ---- 3. 房间名标签 ---- */
+    const labelSum = JSON.stringify([s.plan.rooms, this.opt.labels]);
+    if (force || labelSum !== this._labelSum){
+      this._labelSum = labelSum;
+      this.buildLabels();
+    }
+  }
+
+  /** 只重建所有灯具（不含普通家具），用于亮度 / 颜色 / 开关微调 */
+  _refreshLamps(){
+    this._lampShadowCount = 0;   // 重置阴影配额，与全量重建保持一致
+    const furn = this.app.store.state.layout.furniture || [];
+    furn.forEach(f => { if (CEILING_TYPES.has(f.type)) this._updateLamp(f); });
+  }
+
+  /** 重建单盏灯：先移除旧 light + light mesh，再 _buildCeilingLight */
+  _updateLamp(f){
+    const idx = (this.lamps || []).findIndex(e => e.lights[0]?.light.userData.fid === f.id);
+    if (idx >= 0){
+      const entry = this.lamps[idx];
+      entry.lights.forEach(l => this.lightG.remove(l.light));
+      entry.targets.forEach(t => this.scene.remove(t));
+      this.lamps.splice(idx, 1);
+    }
+    const oldMesh = this.lampG.children.find(o => o.userData.fid === f.id);
+    if (oldMesh){
+      this.lampG.remove(oldMesh);
+      if (oldMesh.geometry) oldMesh.geometry.dispose();
+    }
+    this._buildCeilingLight(f);
   }
 
   _applyGrow(){
