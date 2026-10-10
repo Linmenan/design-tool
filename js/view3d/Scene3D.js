@@ -4,6 +4,9 @@ import { $, esc, area, clamp01, ease, toast, shade } from '../core/Utils.js';
 import { tr, nm } from '../core/I18n.js';
 
 const OX = 6000, OY = 5300, H = 2.8, FOV = 45;
+const WALK_FOV = 72;        // 漫游第一人称默认垂直 FOV（≈人眼舒适视野，房间不显闭塞）
+const WALK_FOV_MIN = 50;    // 滚轮调节下限
+const WALK_FOV_MAX = 95;    // 滚轮调节上限
 const COARSE = matchMedia('(pointer:coarse)').matches;
 
 /**
@@ -252,6 +255,17 @@ export class Scene3D {
     });
     cv.addEventListener('pointercancel', () => { touchLook = null; });
 
+    /* --- 滚轮调焦（漫游模式下，仅调整本机 FOV，不影响鸟瞰） --- */
+    cv.addEventListener('wheel', e => {
+      if (!this.walk) return;
+      e.preventDefault();
+      const delta = Math.sign(e.deltaY);
+      const nv = Math.max(WALK_FOV_MIN, Math.min(WALK_FOV_MAX, (this.walk.fov || WALK_FOV) - delta * 2));
+      this.walk.fov = nv;
+      this.camera.fov = nv;
+      this.camera.updateProjectionMatrix();
+    }, { passive: false });
+
     /* --- 退出按钮 --- */
     const exit = document.getElementById('walkExit');
     if (exit) exit.addEventListener('click', () => this.exitWalk());
@@ -264,7 +278,7 @@ export class Scene3D {
   }
 
   /* ---------- 墙段生成（支持中心线格式 + 数组格式） ---------- */
-  _wallBox(w, yb, yt){
+  _wallBox(w, yb, yt, mat){
     if (yt - yb <= .001) return;
     let cx, cy, L, T, rotY = 0;
     if (Array.isArray(w)){
@@ -283,10 +297,11 @@ export class Scene3D {
     }
     const h = yt - yb;
     const geo = new THREE.BoxGeometry(L, h, T);
-    const o = new THREE.Mesh(geo, [this.wallMat, this.wallMat, this.capMat, this.wallMat, this.wallMat, this.wallMat]);
+    const mats = mat || [this.wallMat, this.wallMat, this.capMat, this.wallMat, this.wallMat, this.wallMat];
+    const o = new THREE.Mesh(geo, mats);
     o.position.set(this.wx(cx), (yb + yt) / 2, this.wz(cy));
     o.rotation.y = rotY;
-        o.castShadow = true; o.receiveShadow = true;
+    o.castShadow = true; o.receiveShadow = true;
     this.archUp.add(o);
   }
 
@@ -352,6 +367,53 @@ export class Scene3D {
         if (hit.head < top - 0.01) this._wallBox(segWall, hit.head, top);
       }
     }
+  }
+
+  /**
+   * 为落在墙缺口处的窗（凸窗 / 外飘窗 / 独立窗）补齐窗台墙（sill 以下）和窗楣墙（head 以上）。
+   * 判定规则：窗的几何沿其自身方向，被任一未拆除的墙覆盖超过 90% → 认为由该墙承载，
+   * 不补；否则视为独立窗，按窗的自身几何补上下墙段。
+   */
+  _ensureWindowWalls(plan, layout, top){
+    const walls = plan.walls || [];
+    const dem = layout.demolished || [];
+    const winWallMat = [
+      this.wallMat, this.wallMat, this.capMat,
+      this.wallMat, this.wallMat, this.wallMat,
+    ];
+
+    (plan.windows || []).forEach(win => {
+      if (!win || !Number.isFinite(+win.x0) || !Number.isFinite(+win.y0)
+        || !Number.isFinite(+win.x1) || !Number.isFinite(+win.y1)) return;
+      const winLen = Math.hypot(win.x1 - win.x0, win.y1 - win.y0);
+      if (winLen < 1) return;
+      const wcx = (win.x0 + win.x1) / 2;
+      const wcy = (win.y0 + win.y1) / 2;
+      const winT = win.t || 240;
+
+      /* 沿窗方向统计被墙覆盖的长度 */
+      let maxCover = 0;
+      for (const w of walls){
+        if (dem.includes(w.id)) continue;
+        // 距离窗中心必须足够近（考虑两倍厚度容差）
+        const d = this._distToSeg(wcx, wcy, w.x0, w.y0, w.x1, w.y1);
+        if (d > (w.t + winT) / 2 + 200) continue;
+        // 投影到墙中心线，计算重叠长度
+        const t1 = this._projectT({ x:win.x0, y:win.y0 }, w);
+        const t2 = this._projectT({ x:win.x1, y:win.y1 }, w);
+        const wallLen = Math.hypot(w.x1 - w.x0, w.y1 - w.y0) || 1;
+        const ovl = Math.abs(t2 - t1) * wallLen;
+        if (ovl > maxCover) maxCover = ovl;
+      }
+
+      /* 覆盖率 > 90% 认为由墙承载；否则补齐上下墙段 */
+      if (maxCover > winLen * 0.9) return;
+
+      const sill = (win.sill || 900) / 1000;
+      const head = Math.min(2.4, top);
+      if (sill > 0.01)   this._wallBox(win, 0, Math.min(sill, top), winWallMat);
+      if (head < top - 0.01) this._wallBox(win, head, top, winWallMat);
+    });
   }
 
   /** 点 p 在墙中心线上的参数 t ∈ [0,1] */
@@ -425,6 +487,11 @@ export class Scene3D {
       });
       this._buildWallWithOpenings(w, openings, top);
     });
+
+    /* 补充：位于墙缺口处的窗（外凸窗 / 外飘窗）的窗台墙与窗楣墙。
+     * 这类窗的几何不落在任何一段墙的中心线上，需要主动补齐上下墙段，
+     * 否则 3D 场景里会看到窗下没有墙、玻璃"悬空"。 */
+    this._ensureWindowWalls(plan, layout, top);
 
     /* 窗（上下墙 + 玻璃） */
     (plan.windows || []).forEach(win => {
@@ -1183,8 +1250,8 @@ export class Scene3D {
     if (!h) return;
     if (this.walk){
       h.textContent = tr(
-        'WASD 移动 · 鼠标转向 · Shift 快走 · E 开门 · Esc 退出',
-        'WASD move · mouse look · Shift run · E door · Esc exit'
+        'WASD 移动 · 鼠标转向 · Shift 快走 · 滚轮调焦 · E 开门 · Esc 退出',
+        'WASD move · mouse look · Shift run · wheel FOV · E door · Esc exit'
       );
     } else {
       h.textContent = tr(
@@ -1255,9 +1322,12 @@ export class Scene3D {
 
     this.anim = null;
     this.fly = null;
-    this.walk = { x:px, z:pz, y:1.6, yaw, pitch:0, speed:2.4, runMul:1.8, locked:false };
+    this.walk = { x:px, z:pz, y:1.6, yaw, pitch:0, speed:2.4, runMul:1.8, locked:false, fov:WALK_FOV };
     this.opt.mode = 'walk';
     this.orbit.enabled = false;
+    // 第一人称：切换到较宽的 FOV（人眼舒适视野，房间不闭塞）
+    this.camera.fov = WALK_FOV;
+    this.camera.updateProjectionMatrix();
     this._applyWalkCam();
 
     // UI
@@ -1294,6 +1364,9 @@ export class Scene3D {
 
     this.opt.mode = 'orbit';
     this.orbit.enabled = true;
+    // 恢复鸟瞰视角的 FOV
+    this.camera.fov = FOV;
+    this.camera.updateProjectionMatrix();
     document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === 'orbit'));
 
     if (!silent){
