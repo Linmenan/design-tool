@@ -1031,6 +1031,12 @@ export class Scene3D {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.05;
+    /* Canvas 显式绝对定位 + z-index 0，锁死在最底层。
+       否则 CSS2DRenderer 的 DOM 层（position:absolute; inset:0）会把它盖住，
+       出现"房间名能看见、WebGL 场景全黑"的现象。 */
+    Object.assign(renderer.domElement.style, {
+      position: 'absolute', inset: '0', zIndex: '0',
+    });
     host.prepend(renderer.domElement);
 
     const scene = this.scene = new THREE.Scene();
@@ -1083,10 +1089,16 @@ export class Scene3D {
     });
     scene.add(this.archFloor, this.archUp, this.furnG, this.lampG, this.lightG, this.labelG, this.ceilingG);
 
-    /* CSS2D 标签渲染器：叠加在 WebGL canvas 之上，用于显示房间名 */
+    /* CSS2D 标签渲染器：叠加在 WebGL canvas 之上，用于显示房间名。
+       关键：显式声明 background 透明 —— 不写的话某些浏览器 / 主题会用默认底色，
+       把底下的 canvas 整个盖住。 */
     const lr = this.labelRenderer = new CSS2DRenderer();
     lr.setSize(this.SW(), this.SH());
-    Object.assign(lr.domElement.style, { position:'absolute', inset:'0', pointerEvents:'none', zIndex:'2' });
+    Object.assign(lr.domElement.style, {
+      position: 'absolute', inset: '0',
+      zIndex: '1', pointerEvents: 'none',
+      background: 'transparent', overflow: 'visible',
+    });
     host.appendChild(lr.domElement);
 
     /* ---- 点击门开合 ---- */
@@ -1101,7 +1113,20 @@ export class Scene3D {
       if (dt > 400 || dist > 5) return;
       if (this.walk) return;
       const h = this._pick(e);
-      if (h?.door){ h.door.open = !h.door.open; }
+      if (h?.door){
+        h.door.open = !h.door.open;
+        return;
+      }
+      /* 只有灯具在 3D 里支持点击选中；
+         普通家具的编辑仍然通过 2D 或左侧属性栏进行。 */
+      if (h?.fid && h.isLamp){
+        this.app?.select?.({ kind:'furn', id: h.fid });
+        if (matchMedia('(max-width:1100px)').matches){
+          document.querySelector('aside.right')?.classList.add('open');
+        }
+        return;
+      }
+      /* 点击房间 / 家具不改变选中状态 */
     });
 
     new ResizeObserver(() => {
@@ -1587,6 +1612,8 @@ export class Scene3D {
     this._clear(this.lampG);
     this._clear(this.lightG);
     this.lamps = [];
+    /* 全局阴影光源配额：每次重建都归零，由 _buildCeilingLight 逐个消耗 */
+    this._lampShadowCount = 0;
 
     (this.app.store.state.layout.furniture || []).forEach(f => {
       if (CEILING_TYPES.has(f.type)){
@@ -1606,10 +1633,11 @@ export class Scene3D {
     this.lampG.visible  = !!this.opt.lamps;
     this.lightG.visible = true;      // 光源容器始终可见，显隐只由夜景开关的强度控制
 
-    /* 夜景开关 → 光源强度 */
+    /* 夜景开关 + 单灯开关 → 光源强度 */
     (this.lamps || []).forEach(entry => {
       entry.lights.forEach(l => {
-        l.light.intensity = this.opt.night ? l.base : 0;
+        const en = l.light.userData.enabled !== false;
+        l.light.intensity = (this.opt.night && en) ? l.base : 0;
       });
     });
 
@@ -1626,22 +1654,57 @@ export class Scene3D {
     return '#ffd9a8';
   }
 
+  /** 找包含点 (cx, cy)（毫米）的房间，返回内切圆半径近似（米）；找不到返回 4m */
+  _roomRadiusAt(cxMM, cyMM){
+    const rooms = (this.app.store.state.plan && this.app.store.state.plan.rooms) || [];
+    for (const r of rooms){
+      if (!r.poly || r.poly.length < 3) continue;
+      if (!this._pointInPoly(cxMM, cyMM, r.poly)) continue;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const [x, y] of r.poly){
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+      const w = (maxX - minX) / 1000, d = (maxY - minY) / 1000;
+      return Math.max(1.5, Math.min(w, d) / 2);
+    }
+    return 4;
+  }
+  _pointInPoly(px, py, poly){
+    let inside = false;
+    const n = poly.length;
+    for (let i = 0, j = n - 1; i < n; j = i++){
+      const xi = poly[i][0], yi = poly[i][1];
+      const xj = poly[j][0], yj = poly[j][1];
+      if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
+  }
+
   /**
    * 生成一盏天花板灯。
-   * - 灯体 Mesh 按类型不同；
-   * - 光源按形状分布（不是单点），让"光源形状"跟灯具一致：
-   *     圆形吸顶灯 → 1 中心 + 4 环 = 5 个 PointLight
-   *     方形吸顶灯 → 2×2 网格 = 4 个 PointLight
-   *     灯带       → 沿长边 3~6 个 PointLight
-   *     筒灯       → 1 个 PointLight（短距）
-   *     射灯       → 1 个 SpotLight（锥形）
-   * - 位置固定在 H（层高）下方；拖动灯具在 2D 中改变 cx / cy 即可。
+   *
+   * WebGL 硬限制：MAX_TEXTURE_IMAGE_UNITS = 16。
+   *   一个带阴影的 PointLight 占 6 张 shadow map；
+   *   一个带阴影的 SpotLight  占 1 张 shadow map。
+   * 所以：
+   *   ① 每盏灯只让 1 个"主光源"带阴影 —— 用 SpotLight 朝下，只占 1 张纹理；
+   *   ② 主光源的 shadow.camera.far 按"房间内切圆半径 × 1.6"约束，
+   *      只对本房间范围内的墙 / 家具计算阴影，隔壁墙 / 家具根本不进 shadow map，
+   *      天然不漏光，也大幅降低每帧阴影渲染量；
+   *   ③ 其余"辅助光源"用 PointLight、**不开阴影**、distance 缩到
+   *      "房间内切圆 × 0.9"，只做本房间内的柔和补光，越界即衰减到 0，
+   *      也照不到隔壁房间；
+   *   ④ 全局带阴影光源 ≤ MAX_SHADOW（桌面 6 / 触屏 3），避免纹理单元超限。
    */
   _buildCeilingLight(f){
     const w = this.M(f.w), d = this.M(f.d);
     const cx = this.wx(f.cx), cz = this.wz(f.cy);
     const rot = -f.rot * Math.PI / 180;
     const lamp = f.lamp || {};
+    const enabled = lamp.on !== false;
     const hex = this._lampColor(lamp);
     const intensity = Math.max(.2, Math.min(3, lamp.intensity ?? 1));
     const y = H - 0.02;
@@ -1649,11 +1712,49 @@ export class Scene3D {
     const lights = [];          // [{ light, base }]
     const targets = [];         // SpotLight 目标
 
-    /** 在某位置加一个 PointLight，base 是该灯的基准强度 */
-    const addPoint = (x, yPos, z, base, dist) => {
-      const pl = new THREE.PointLight(new THREE.Color(hex), 0, dist, 1.4);
+    /* 房间约束：阴影与光照都被房间内切圆限制，超出即忽略 */
+    const roomR = this._roomRadiusAt(f.cx, f.cy);
+    const shadowFar = Math.max(2.5, Math.min(7, roomR * 1.6));   // 阴影相机远平面
+    const lightFar  = shadowFar + 2;                             // 主光源有效距离
+    const auxDist   = Math.min(2.5, roomR * 0.9);                // 辅助光源有效距离
+
+    /* 全局阴影配额：超过就不再给新光源开阴影，避免纹理单元超限 */
+    const MAX_SHADOW = COARSE ? 3 : 6;
+    if (this._lampShadowCount == null) this._lampShadowCount = 0;
+    const allowShadow = this._lampShadowCount < MAX_SHADOW;
+    this._lampShadowCount++;
+
+    /** 主光源：1 个 SpotLight 朝下；受配额控制是否带阴影（占 1 张纹理） */
+    const addMain = (x, yPos, z, base, coneDeg) => {
+      const sp = new THREE.SpotLight(new THREE.Color(hex), 0, lightFar, coneDeg * Math.PI / 180, .4, 1.4);
+      sp.position.set(x, yPos, z);
+      sp.userData.fid = f.id;
+      sp.userData.enabled = enabled;
+      sp.userData.main = true;
+      if (allowShadow){
+        sp.castShadow = true;
+        sp.shadow.mapSize.setScalar(COARSE ? 256 : 512);
+        sp.shadow.bias = -0.003;
+        sp.shadow.normalBias = 0.02;
+        sp.shadow.camera.near = 0.05;
+        sp.shadow.camera.far = shadowFar;
+      } else {
+        sp.castShadow = false;
+      }
+      const tg = new THREE.Object3D();
+      tg.position.set(x, 0, z);
+      this.scene.add(tg);
+      sp.target = tg;
+      lights.push({ light: sp, base });
+      targets.push(tg);
+    };
+
+    /** 辅助光源：PointLight，无阴影，短距离（照不到隔壁） */
+    const addAux = (x, yPos, z, base) => {
+      const pl = new THREE.PointLight(new THREE.Color(hex), 0, auxDist, 1.6);
       pl.position.set(x, yPos, z);
       pl.userData.fid = f.id;
+      pl.userData.enabled = enabled;
       pl.castShadow = false;
       lights.push({ light: pl, base });
     };
@@ -1665,13 +1766,12 @@ export class Scene3D {
         const r = Math.min(w, d) / 2;
         mesh = this._mesh(new THREE.CylinderGeometry(r, r * .95, .05, 24), mat);
         mesh.position.set(cx, y - .025, cz);
-        /* 环形 + 中心分布：5 个 PointLight，总强度 = intensity * 4 */
-        const per = intensity * 4 / 5;
-        const yLight = y - .15;
-        addPoint(cx, yLight, cz, per, 5.5);
+        /* 主光源：中心大锥角 SpotLight 朝下，覆盖整间房；辅助：4 个短距点光补柔光 */
+        addMain(cx, y - .1, cz, intensity * 4, 120);
+        const per = intensity * 1.2 / 4;
         for (let i = 0; i < 4; i++){
           const a = i * Math.PI / 2 + rot;
-          addPoint(cx + Math.cos(a) * r * .55, yLight, cz + Math.sin(a) * r * .55, per, 5.5);
+          addAux(cx + Math.cos(a) * r * .55, y - .12, cz + Math.sin(a) * r * .55, per);
         }
         break;
       }
@@ -1679,13 +1779,13 @@ export class Scene3D {
         mesh = this._mesh(new THREE.BoxGeometry(w, .05, d), mat);
         mesh.position.set(cx, y - .025, cz);
         mesh.rotation.y = rot;
-        /* 2×2 网格分布：4 个 PointLight，总强度 = intensity * 4 */
-        const per = intensity * 4 / 4;
+        addMain(cx, y - .1, cz, intensity * 4, 120);
+        const per = intensity * 1.2 / 4;
         const hw = w * .25, hd = d * .25;
         const cs = Math.cos(rot), sn = Math.sin(rot);
         for (const sx of [-1, 1]) for (const sz of [-1, 1]){
           const lx =  sx * hw, lz = sz * hd;
-          addPoint(cx + cs * lx - sn * lz, y - .15, cz + sn * lx + cs * lz, per, 5.5);
+          addAux(cx + cs * lx - sn * lz, y - .12, cz + sn * lx + cs * lz, per);
         }
         break;
       }
@@ -1693,16 +1793,16 @@ export class Scene3D {
         mesh = this._mesh(new THREE.BoxGeometry(w, .025, d), mat);
         mesh.position.set(cx, y - .013, cz);
         mesh.rotation.y = rot;
-        /* 沿长边 N 个 PointLight（3~6），总强度 = intensity * 2.5 */
+        /* 沿长边 2~4 个"主光源"，锥角略小，覆盖条状区域；无辅助光源 */
         const isHoriz = w >= d;
         const L = isHoriz ? w : d;
-        const n = Math.max(3, Math.min(6, Math.round(L / .4)));
-        const per = intensity * 2.5 / n;
+        const n = Math.max(2, Math.min(4, Math.round(L / .6)));
+        const per = intensity * 3 / n;
         const cs = Math.cos(rot), sn = Math.sin(rot);
         for (let i = 0; i < n; i++){
-          const t = (i / (n - 1) - .5) * L;   // -L/2 ~ L/2
+          const t = (i / (n - 1) - .5) * L;
           const lx = isHoriz ? t : 0, lz = isHoriz ? 0 : t;
-          addPoint(cx + cs * lx - sn * lz, y - .1, cz + sn * lx + cs * lz, per, 4.5);
+          addMain(cx + cs * lx - sn * lz, y - .08, cz + sn * lx + cs * lz, per, 100);
         }
         break;
       }
@@ -1710,40 +1810,32 @@ export class Scene3D {
         const r = Math.min(w, d) / 2;
         mesh = this._mesh(new THREE.CylinderGeometry(r, r, .06, 16), mat);
         mesh.position.set(cx, y - .03, cz);
-        addPoint(cx, y - .05, cz, intensity * 2, 3);
+        addMain(cx, y - .05, cz, intensity * 3, 60);
         break;
       }
       case 'spotlight': {
         const r = Math.min(w, d) / 2;
         mesh = this._mesh(new THREE.CylinderGeometry(r, r * .7, .08, 16), mat);
         mesh.position.set(cx, y - .04, cz);
-        const sp = new THREE.SpotLight(new THREE.Color(hex), 0, 4.5, Math.PI / 8, .4, 1.2);
-        sp.position.set(cx, y - .05, cz);
-        sp.userData.fid = f.id;
-        sp.castShadow = false;
-        const tg = new THREE.Object3D();
-        tg.position.set(cx, 0, cz);
-        this.scene.add(tg);
-        sp.target = tg;
-        lights.push({ light: sp, base: intensity * 3 });
-        targets.push(tg);
+        addMain(cx, y - .05, cz, intensity * 4, 45);
         break;
       }
       default: return;
     }
 
     /* 灯体（可见模型）→ lampG（由"灯具"开关控制显隐）
-       光源（PointLight / SpotLight）→ lightG（永远 visible，仅由夜景开关控制强度） */
+       光源（SpotLight / PointLight）→ lightG（永远 visible，仅由夜景开关控制强度） */
     if (mesh){
       mesh.userData.fid = f.id;
+      mesh.userData.isLamp = true;
       mesh.castShadow = false;
       mesh.receiveShadow = false;
       this.lampG.add(mesh);
     }
     lights.forEach(l => this.lightG.add(l.light));
 
-    /* 光照只与夜景开关相关 */
-    const on = !!this.opt.night;
+    /* 光照 = 夜景开关 AND 单灯开关 */
+    const on = !!this.opt.night && enabled;
     lights.forEach(l => { l.light.intensity = on ? l.base : 0; });
 
     this.lamps.push({ lights, targets });
@@ -1832,10 +1924,11 @@ export class Scene3D {
     this.scene.background = new THREE.Color(this.opt.night ? 0x1c2130 : 0xf7f4ee);
     this.ground.material.color.set(this.opt.night ? 0x2a2e38 : 0xf2eee7);
 
-    /* 顶灯：仅由夜景开关控制；灯具模型可见性不影响光照 */
+    /* 顶灯：夜景开关 + 单灯开关；灯具模型可见性不影响光照 */
     (this.lamps || []).forEach(entry => {
       entry.lights.forEach(l => {
-        l.light.intensity = this.opt.night ? l.base : 0;
+        const en = l.light.userData.enabled !== false;
+        l.light.intensity = (this.opt.night && en) ? l.base : 0;
       });
     });
 
@@ -1990,16 +2083,20 @@ export class Scene3D {
       -(e.clientY - r.top) / r.height * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ptr, this.camera);
-    const targets = [this.furnG, this.archUp];
+    /* 优先拾取灯具，其次家具，最后建筑（墙、门、窗）；
+       lampG 里的灯体较小，若放后面会被同位置的家具/天花挡住。 */
+    const targets = [this.lampG, this.furnG, this.archUp];
     const hits = ray.intersectObjects(targets, true);
     for (const h of hits){
       if (h.object.material === this.glassMat) continue;
-      let o = h.object;
-      while (o && !o.userData.door && !o.userData.fid && !o.userData.room && o !== this.scene){
+      let o = h.object, isLamp = false;
+      while (o && o !== this.scene){
+        if (o.userData.isLamp) isLamp = true;
+        if (o.userData.door || o.userData.fid || o.userData.room) break;
         o = o.parent;
       }
       if (o?.userData?.door) return { door: o.userData.door, dist: h.distance };
-      if (o?.userData?.fid)  return { fid: o.userData.fid,  dist: h.distance };
+      if (o?.userData?.fid)  return { fid: o.userData.fid, isLamp, dist: h.distance };
       if (o?.userData?.room) return { room: o.userData.room, dist: h.distance };
     }
     return null;
@@ -2081,8 +2178,8 @@ export class Scene3D {
       h.textContent = tr('WASD 移动 · 鼠标转向 · Shift 快走 · 滚轮调焦 · E 开门 · Esc 退出',
                         'WASD move · mouse look · Shift run · wheel FOV · E door · Esc exit');
     } else {
-      h.textContent = tr('左键旋转 · 右键平移 · 滚轮缩放 · 单击门板开关门',
-                        'Left-drag orbits · scroll zooms · click a door leaf to open/close');
+      h.textContent = tr('左键旋转 · 右键平移 · 滚轮缩放 · 单击门板开关门 · 点击灯具 / 家具可编辑',
+                        'Left-drag orbits · scroll zooms · click a door leaf to open/close · click a light or furniture to edit');
     }
   }
   relang(){ this._syncHint(); if (this.inited) this.buildLabels(); }
