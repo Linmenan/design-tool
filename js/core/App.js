@@ -1,9 +1,10 @@
 import { bus } from './EventBus.js';
 import { tr, nm, getLang, setLang, applyStaticLang } from './I18n.js';
+// nm 保留下方可能引用，避免旧文件遗漏；本文件当前不使用 nm
 import { $, $$, toast } from './Utils.js';
 import { Store } from './Store.js';
 import { StageManager } from '../stage/StageManager.js';
-import { defaultState } from '../data/defaultLayout.js';
+import { defaultState, emptyState } from '../data/defaultLayout.js';
 
 /**
  * 数据清洗：把可能含 NaN / 缺字段的墙、门、窗剔除或规范化。
@@ -122,6 +123,7 @@ export class App {
       mA: null, mCur: null,
       layers: { dims:true, autoDims:false, labels:true, furn:true, grid:false, bearing:false, wallSnap:true },
     };
+    this._radialActive = null;
   }
 
   async boot(){
@@ -149,7 +151,8 @@ export class App {
       try { localStorage.removeItem(STORE_KEY); } catch {}
     }
 
-    const initial = persisted || defaultState();
+    // 默认打开空白户型（默认户型几何保留在 planData.js，可通过文件菜单加载）
+    const initial = persisted || emptyState('新户型');
     initial.plan = sanitizePlan(initial.plan);
 
     this.store = new Store(initial);
@@ -169,9 +172,9 @@ export class App {
     await this._loadViews();
     await this._loadUI();
     this._bindGlobal();
-    this.stage.enter('layout');
+    this.stage.enter('edit');
     bus.emit('app:ready');
-    console.log('[App] 启动完成 · 默认进入 layout 阶段（切到 edit 才能画户型）');
+    console.log('[App] 启动完成 · 默认进入 edit 阶段（户型编辑）');
   }
 
   async _loadViews(){
@@ -251,7 +254,8 @@ export class App {
           const { plan, layout, meta } = await loadFromFile(file);
           this.store.mutate('import file', s => {
             s.plan = sanitizePlan(plan);
-            s.layout = layout || { furniture: [], demolished: [], measures: [] };
+            s.layout = layout || { furniture: [], demolished: [], demolitions: [], measures: [] };
+            s.layout.demolitions = Array.isArray(s.layout.demolitions) ? s.layout.demolitions : [];
             s.meta = { ...s.meta, name: meta.name || file.name.replace(/\.[^.]+$/, '') };
           });
           this.select(null);
@@ -266,25 +270,149 @@ export class App {
       });
     }
 
-    /* ---- 全局快捷键：Ctrl/Cmd+Z 撤销，Ctrl/Cmd+Y 或 Ctrl/Cmd+Shift+Z 重做 ---- */
+    /* ---- 全局快捷键 ---- */
     window.addEventListener('keydown', e => {
-      // 在输入框里不拦截（允许浏览器原生的输入撤销）
+      // 在输入框里不拦截（允许浏览器原生的输入撤销 / 键入）
       const t = e.target;
       if (t && t.matches && t.matches('input,select,textarea,[contenteditable="true"]')) return;
 
       const mod = e.metaKey || e.ctrlKey;
-      if (!mod) return;
-
       const k = e.key.toLowerCase();
-      if (k === 'z'){
+
+      /* Ctrl/Cmd 组合键 */
+      if (mod){
+        if (k === 'z'){
+          e.preventDefault();
+          if (e.shiftKey) this._redo(); else this._undo();
+        } else if (k === 'y'){
+          e.preventDefault();
+          this._redo();
+        }
+        return;
+      }
+
+      /* 编辑阶段单键快捷键：V 选择 / W 画墙 / R 画房间 / M 测量 / D 开门窗 / N 开窗 / Esc 取消 */
+      if (this.stage?.current !== 'edit') return;
+      if (e.altKey || e.metaKey || e.ctrlKey) return;
+
+      const map = {
+        v: 'select',
+        w: 'draw-wall',
+        r: 'draw-room',
+        m: 'measure',
+        d: 'add-door',
+        n: 'add-window',
+        escape: 'select',
+      };
+      const tool = map[k];
+      if (tool){
         e.preventDefault();
-        if (e.shiftKey) this._redo();
-        else this._undo();
-      } else if (k === 'y'){
-        e.preventDefault();
-        this._redo();
+        this.setTool(tool);
       }
     });
+  }
+
+  /* ============================================================
+   *  长按滚轮快捷轮盘
+   * ============================================================ */
+
+  /** 当前上下文对应的轮盘选项 */
+  _radialOptions(){
+    const t = this.ui.tool;
+    const ed = this.view2d?.editor || {};
+    const cat = (t === 'draw-wall' || t === 'demolish') ? 'wall'
+              : (t === 'add-door' || t === 'add-window') ? 'opening'
+              : (t === 'draw-room' || t === 'auto-room') ? 'room'
+              : (t === 'measure') ? 'measure' : 'select';
+
+    if (cat === 'wall'){
+      return [
+        { label: tr('外墙','Exterior'),    action: () => { ed.wallKind = 'e';   this.setTool('draw-wall'); } },
+        { label: tr('承重墙','Bearing'),   action: () => { ed.wallKind = 'b';   this.setTool('draw-wall'); } },
+        { label: tr('隔墙','Partition'),   action: () => { ed.wallKind = 'n';   this.setTool('draw-wall'); } },
+        { label: tr('矮墙 / 栏板','Low'),  action: () => { ed.wallKind = 'low'; this.setTool('draw-wall'); } },
+        { label: tr('拆墙','Demolish'),    action: () => this.setTool('demolish') },
+      ];
+    }
+    if (cat === 'opening'){
+      return [
+        { label: tr('开门','Door'),   action: () => this.setTool('add-door') },
+        { label: tr('开窗','Window'), action: () => this.setTool('add-window') },
+      ];
+    }
+    /* 其余一级菜单 */
+    return [
+      { label: tr('选择','Select'),      action: () => this.setTool('select') },
+      { label: tr('画墙','Draw wall'),   action: () => this.setTool('draw-wall') },
+      { label: tr('画房间','Draw room'), action: () => this.setTool('draw-room') },
+      { label: tr('测量','Measure'),     action: () => this.setTool('measure') },
+      { label: tr('开门窗','Door/Win'),  action: () => this.setTool('add-door') },
+    ];
+  }
+
+  /** 显示快捷轮盘 */
+  showRadial(cx, cy){
+    const opts = this._radialOptions();
+    if (!opts.length) return;
+    const el = document.getElementById('radialMenu');
+    if (!el) return;
+
+    const R = 78, N = opts.length;
+    el.innerHTML = `<div class="radial-center"></div>` + opts.map((o, i) => {
+      const a = -Math.PI / 2 + i * (Math.PI * 2 / N);
+      const x = Math.cos(a) * R;
+      const y = Math.sin(a) * R;
+      return `<button class="radial-item" data-idx="${i}"
+        style="transform:translate(calc(-50% + ${x.toFixed(1)}px),calc(-50% + ${y.toFixed(1)}px))">${o.label}</button>`;
+    }).join('');
+    el.style.left = cx + 'px';
+    el.style.top  = cy + 'px';
+    el.classList.add('show');
+
+    this._radialActive = { cx, cy, opts, el };
+
+    const onMove = ev => {
+      const dx = ev.clientX - cx, dy = ev.clientY - cy;
+      const dist = Math.hypot(dx, dy);
+      const items = el.querySelectorAll('.radial-item');
+      if (dist < 26){
+        items.forEach(x => x.classList.remove('on'));
+        return;
+      }
+      const mouseAng = Math.atan2(dy, dx);
+      const sector = Math.PI * 2 / N;
+      let bestIdx = -1, bestDelta = Infinity;
+      for (let i = 0; i < N; i++){
+        const oa = -Math.PI / 2 + i * sector;
+        let d = mouseAng - oa;
+        d = Math.atan2(Math.sin(d), Math.cos(d));
+        if (Math.abs(d) < bestDelta){ bestDelta = Math.abs(d); bestIdx = i; }
+      }
+      items.forEach((x, i) => x.classList.toggle('on', i === bestIdx));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      const sel = el.querySelector('.radial-item.on');
+      el.classList.remove('show');
+      this._radialActive = null;
+      if (sel){
+        const idx = +sel.dataset.idx;
+        opts[idx]?.action();
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
+
+  /** 若已打开轮盘，可强制关闭（用于 Esc / 换工具时） */
+  hideRadial(){
+    if (!this._radialActive) return;
+    const el = this._radialActive.el;
+    el?.classList.remove('show');
+    this._radialActive = null;
   }
 
   /* ---- 撤销 / 重做：统一入口，通知所有视图刷新 ---- */
@@ -342,9 +470,12 @@ export class App {
   }
 
   setTool(t){
+    this.hideRadial();
     this.ui.tool = t;
     this.view2d?.setTool(t);
     this.toolbar?.sync();
+    // 左侧面板根据当前工具刷新二级菜单（编辑阶段）
+    if (this.stage?.current === 'edit') this.libPanel?.rebuild?.();
   }
 
   select(sel){

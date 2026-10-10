@@ -3,8 +3,8 @@
   "version": 3,
   "meta": {
     "name": "新户型",
-    "createdAt": 1791612580033,
-    "modifiedAt": 1791612580033,
+    "createdAt": 1791616999950,
+    "modifiedAt": 1791616999950,
     "version": 3
   },
   "plan": {
@@ -120,7 +120,35 @@
     ],
     "windows": [],
     "slides": [],
-    "rooms": [],
+    "rooms": [
+      {
+        "id": "room_fmv22hzdr1",
+        "name": "新房间",
+        "poly": [
+          [
+            3390,
+            -500
+          ],
+          [
+            5220,
+            -500
+          ],
+          [
+            5220,
+            1640
+          ],
+          [
+            3390,
+            1640
+          ]
+        ],
+        "mat": "tile800",
+        "at": [
+          4305,
+          570
+        ]
+      }
+    ],
     "mats": {
       "wood": {
         "name": "橡木地板",

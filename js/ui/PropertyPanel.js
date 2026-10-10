@@ -28,10 +28,11 @@ export class PropertyPanel {
     const stage = this.app.stage.current;
     if (stage === 'edit'){
       const key = sel?.id ?? sel?.idx;
-      if (sel?.kind === 'wall')   return this._wallPanel(key);
-      if (sel?.kind === 'door')   return this._doorPanel(key);
-      if (sel?.kind === 'window') return this._windowPanel(key);
-      if (sel?.kind === 'room')   return this._roomPanel(key, true);
+      if (sel?.kind === 'wall')       return this._wallPanel(key);
+      if (sel?.kind === 'demolition') return this._demolitionPanel(key);
+      if (sel?.kind === 'door')       return this._doorPanel(key);
+      if (sel?.kind === 'window')     return this._windowPanel(key);
+      if (sel?.kind === 'room')       return this._roomPanel(key, true);
       return this._editOverview();
     }
     if (sel?.kind === 'furn'){
@@ -53,12 +54,17 @@ export class PropertyPanel {
     let cost = 0;
     const matRows = Object.entries(byMat).map(([m, a]) => {
       const c = a * plan.mats[m].price * 1.05; cost += c;
-      return `<tr><td><span class="sw" style="background:${plan.mats[m].sw}"></span>${nm(plan.mats[m].name)}</td><td class="r">${fmt(a,1)} m²</td><td class="r">¥${Math.round(c).toLocaleString()}</td></tr>`;
+      return `<tr><td><span class="sw" style="background:${plan.mats[m].sw}"></span>${nm(plan.mats[m].name)}</td><td class="r">${fmt(a,2)} m²</td><td class="r">¥${Math.round(c).toLocaleString()}</td></tr>`;
     }).join('');
-    const demLen = (layout.demolished || []).reduce((a, id) => {
+    let demLen = 0;
+    (layout.demolished || []).forEach(id => {
       const w = (plan.walls || []).find(x => x.id === id);
-      return a + (w ? linearLength(w) : 0);
-    }, 0) / 1000;
+      if (w) demLen += Math.hypot(w.x1 - w.x0, w.y1 - w.y0);
+    });
+    (layout.demolitions || []).forEach(d => {
+      demLen += Math.hypot(d.x1 - d.x0, d.y1 - d.y0);
+    });
+    demLen /= 1000;
 
     this._html(`
       <section><h3>${tr('房间面积','Room Areas')}</h3>
@@ -69,7 +75,7 @@ export class PropertyPanel {
         <div class="total"><span>${tr('合计','Total')}</span><b>¥${Math.round(cost).toLocaleString()}</b></div></section>
       <section><h3>${tr('方案统计','Stats')}</h3>
         <div class="stats"><div><small>${tr('家具数量','Furniture')}</small><span class="big">${layout.furniture.length}</span></div>
-          <div><small>${tr('拆除墙体','Walls removed')}</small><span class="big">${fmt(demLen,1)}</span> m</div></div>
+          <div><small>${tr('拆除墙体','Walls removed')}</small><span class="big">${fmt(demLen,2)}</span> m</div></div>
         <div class="actions"><button class="btn" id="clearMeasure">${tr('清除测量','Clear measures')} (${layout.measures.length})</button>
           <button class="btn danger" id="clearFurn">${tr('清空布置','Clear layout')}</button></div></section>`);
     $$('#panel tr[data-room]').forEach(tr => tr.onclick = () => {
@@ -85,11 +91,11 @@ export class PropertyPanel {
     this._html(`<section><h3>${tr('家具属性','Furniture')}</h3>
       <div class="form">
         <label class="full">${tr('名称','Name')}<input id="fName" value="${esc(nm(f.name))}"></label>
-        <label>${tr('宽','Width')} (mm)<input type="number" id="fW" value="${f.w}" min="50" step="10"></label>
-        <label>${tr('深','Depth')} (mm)<input type="number" id="fD" value="${f.d}" min="50" step="10"></label>
+        <label>${tr('宽','Width')} (mm)<input type="number" id="fW" value="${Math.round(f.w)}" min="50" step="10"></label>
+        <label>${tr('深','Depth')} (mm)<input type="number" id="fD" value="${Math.round(f.d)}" min="50" step="10"></label>
         <label>${tr('中心','Center')} X<input type="number" id="fX" value="${Math.round(f.cx)}" step="10"></label>
         <label>${tr('中心','Center')} Y<input type="number" id="fY" value="${Math.round(f.cy)}" step="10"></label>
-        <label>${tr('旋转','Rotation')} (°)<input type="number" id="fR" value="${f.rot}" step="15"></label>
+        <label>${tr('旋转','Rotation')} (°)<input type="number" id="fR" value="${Math.round(f.rot)}" step="15"></label>
         <label>${tr('颜色','Color')}<input type="color" id="fC" value="${f.color}"></label>
       </div>
       <div class="actions">
@@ -132,9 +138,9 @@ export class PropertyPanel {
       <div class="form"><label class="full">${tr('名称','Name')}<input id="rName" value="${esc(nm(r.name))}"></label></div>
       <div class="stats" style="margin-top:10px">
         <div><small>${tr('面积','Area')}</small><span class="big">${fmt(a)}</span> m²</div>
-        <div><small>${tr('周长','Perimeter')}</small><span class="big">${fmt(perim(r.poly),1)}</span> m</div>
-        <div><small>${tr('开间','Width')}</small><span class="big">${x1-x0}</span> mm</div>
-        <div><small>${tr('进深','Depth')}</small><span class="big">${y1-y0}</span> mm</div></div></section>
+        <div><small>${tr('周长','Perimeter')}</small><span class="big">${fmt(perim(r.poly),2)}</span> m</div>
+        <div><small>${tr('开间','Width')}</small><span class="big">${Math.round(x1-x0)}</span> mm</div>
+        <div><small>${tr('进深','Depth')}</small><span class="big">${Math.round(y1-y0)}</span> mm</div></div></section>
     <section><h3>${tr('地面材料','Flooring')}</h3><div class="mats">${mats}</div></section>
     ${isEdit ? '' : `<section><h3>${tr('房间内家具','Furniture')} <small>${inside.length}</small></h3>
       <table>${inside.map(f => `<tr class="click" data-fid="${f.id}"><td>${esc(nm(f.name))}</td><td class="r muted">${f.w}×${f.d}</td></tr>`).join('') || `<tr><td class="muted">${tr('暂无','None')}</td></tr>`}</table></section>`}
@@ -328,6 +334,60 @@ export class PropertyPanel {
     $('#dFlipS').onclick = () => upd(t => t.swing = t.swing === 'in' ? 'out' : 'in');
     $('#dDel').onclick   = () => { this.app.select(null); store.mutate('del door', s => s.plan.doors = s.plan.doors.filter(x => x.id !== doorId)); };
     $('#back').onclick   = () => this.app.select(null);
+  }
+
+  _demolitionPanel(key){
+    const { layout } = this.app.store.state;
+    const list = layout.demolitions || [];
+    const d = (typeof key === 'number' ? list[key] : list.find(x => x.id === key));
+    if (!d) return this._editOverview();
+    const dmId = d.id;
+    const L = Math.round(Math.hypot(d.x1 - d.x0, d.y1 - d.y0));
+    const angleDeg = Math.round(Math.atan2(d.y1 - d.y0, d.x1 - d.x0) * 180 / Math.PI);
+    this._html(`<section><h3>${tr('拆除段','Demolition')}</h3>
+      <div class="form">
+        <label>${tr('宽','Width')} (mm)<input type="number" id="dmLen" value="${L}" min="100" step="10"></label>
+        <label>X0 (mm)<input type="number" id="dmX0" value="${Math.round(d.x0)}" step="10"></label>
+        <label>Y0 (mm)<input type="number" id="dmY0" value="${Math.round(d.y0)}" step="10"></label>
+        <label>X1 (mm)<input type="number" id="dmX1" value="${Math.round(d.x1)}" step="10"></label>
+        <label>Y1 (mm)<input type="number" id="dmY1" value="${Math.round(d.y1)}" step="10"></label>
+      </div>
+      <div class="stats" style="margin-top:8px">
+        <div><small>${tr('长度','Length')}</small><span class="big">${L}</span> mm</div>
+        <div><small>${tr('角度','Angle')}</small><span class="big">${angleDeg}</span> °</div>
+      </div>
+      <div class="actions">
+        <button class="btn danger" id="dmDel">${tr('恢复墙体','Restore')}</button>
+        <button class="btn" id="back">${tr('← 返回','← Back')}</button>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:8px">${tr('提示：改宽度时拆除段以中心对称伸缩。','Tip: width scales from center.')}</div>
+    </section>`);
+
+    const store = this.app.store;
+    const upd = fn => store.mutate('edit demolition', s => {
+      const t = (s.layout.demolitions || []).find(x => x.id === dmId);
+      if (t) fn(t);
+    });
+
+    $('#dmLen').onchange = e => {
+      const v = Math.max(100, Math.round(parseFloat(e.target.value) / 10) * 10);
+      if (isNaN(v)) return;
+      upd(t => {
+        const cx = (t.x0 + t.x1) / 2, cy = (t.y0 + t.y1) / 2;
+        const dx = t.x1 - t.x0, dy = t.y1 - t.y0;
+        const oldL = Math.hypot(dx, dy) || 1;
+        const ux = dx / oldL, uy = dy / oldL;
+        t.x0 = cx - ux * v / 2; t.y0 = cy - uy * v / 2;
+        t.x1 = cx + ux * v / 2; t.y1 = cy + uy * v / 2;
+      });
+    };
+    const num = (sel, key) => { $(sel).onchange = e => { const v = parseFloat(e.target.value); if (!isNaN(v)) upd(t => t[key] = v); }; };
+    num('#dmX0','x0'); num('#dmY0','y0'); num('#dmX1','x1'); num('#dmY1','y1');
+    $('#dmDel').onclick = () => {
+      this.app.select(null);
+      store.mutate('del demolition', s => s.layout.demolitions = (s.layout.demolitions || []).filter(x => x.id !== dmId));
+    };
+    $('#back').onclick = () => this.app.select(null);
   }
 
   _windowPanel(key){

@@ -20,6 +20,7 @@ export function defaultState(){
     layout: {
       furniture: defaultFurniture(),
       demolished: [],
+      demolitions: [],
       measures: [],
     },
   };
@@ -33,7 +34,7 @@ export function defaultPlanState(name = '三室两厅两卫'){
   return {
     meta: { name, createdAt: Date.now(), modifiedAt: Date.now(), version: 2 },
     plan: cloneDefaultPlan(),
-    layout: { furniture: [], demolished: [], measures: [] },
+    layout: { furniture: [], demolished: [], demolitions: [], measures: [] },
   };
 }
 
@@ -44,7 +45,7 @@ export function emptyState(name = '新户型'){
   return {
     meta: { name, createdAt: Date.now(), modifiedAt: Date.now(), version: 2 },
     plan: emptyPlan(),
-    layout: { furniture: [], demolished: [], measures: [] },
+    layout: { furniture: [], demolished: [], demolitions: [], measures: [] },
   };
 }
 

@@ -9,7 +9,10 @@ const TAP = COARSE ? 9 : 4;
 /**
  * 左侧面板：
  *   layout 阶段 → 家具库（可拖放）
- *   edit   阶段 → 户型资源（可点击工具 / 参数）
+ *   edit   阶段 → 绘制工具（两级菜单，无「户型模板」栏目；模板改用文件菜单加载）
+ *
+ * 一级：选择 / 画墙 / 画房间 / 测量 / 开门窗
+ * 二级：仅「画墙」「开门窗」展开
  */
 export class LibraryPanel {
   constructor(app, root){
@@ -136,98 +139,112 @@ export class LibraryPanel {
   }
 
   /* =========================== 编辑阶段 =========================== */
+  /** 根据当前工具推断一级类别 */
+  _catOf(t){
+    if (t === 'draw-wall' || t === 'demolish') return 'wall';
+    if (t === 'add-door' || t === 'add-window') return 'opening';
+    if (t === 'draw-room' || t === 'auto-room') return 'room';
+    if (t === 'measure') return 'measure';
+    return 'select';
+  }
+
   _editHTML(){
     const ed = this.app.view2d.editor;
-    const kindLabel = { n:'普通隔墙', b:'承重墙', e:'外墙', low:'矮墙 / 栏板' };
-    return `<div id="lib">
-      <h4>${tr('户型模板','Plan templates')}</h4>
-      <div class="lib-grid" style="grid-template-columns:1fr">
-        <button class="mat" data-tpl="default">
-          <i style="background:#e3dccf"></i>
-          <span>${tr('三室两厅两卫（默认）','3BR 2LR 2BA (default)')}<small>${tr('加载内置户型','Load built-in')}</small></span>
-        </button>
-        <button class="mat" data-tpl="empty">
-          <i style="background:#fff;border:1px dashed #bbb"></i>
-          <span>${tr('空白户型','Blank plan')}<small>${tr('从零开始绘制','Start from scratch')}</small></span>
-        </button>
-        <button class="mat" data-tpl="load">
-          <i style="background:#f1eee8"></i>
-          <span>${tr('从文件加载…','Load from file…')}<small>.plan.json</small></span>
-        </button>
-      </div>
+    const t = this.app.ui.tool;
+    const cat = this._catOf(t);
 
-      <h4>${tr('绘制工具','Draw tools')}</h4>
-      <div class="lib-grid" style="grid-template-columns:1fr">
-        <button class="mat tool" data-tool="select"><i style="background:#e9e3d8"></i><span>${tr('选择','Select')}<small>V</small></span></button>
-        <button class="mat tool" data-tool="draw-wall"><i style="background:#a7a195"></i><span>${tr('画墙','Draw wall')}<small>W · ${tr('拖动绘制','drag')}</small></span></button>
-        <button class="mat tool" data-tool="draw-room"><i style="background:#2f5d62"></i><span>${tr('画房间','Draw room')}<small>${tr('拖动框选','drag rect')}</small></span></button>
-        <button class="mat tool" data-tool="auto-room"><i style="background:#2f5d62"></i><span>${tr('智能房间','Smart room')}<small>${tr('点击自动识别','click to detect')}</small></span></button>
-        <button class="mat tool" data-tool="add-door"><i style="background:#b5653a"></i><span>${tr('开门','Door')}<small>${tr('在墙上点一下','click on wall')}</small></span></button>
-        <button class="mat tool" data-tool="add-window"><i style="background:#4f7394"></i><span>${tr('开窗','Window')}<small>${tr('在墙上点一下','click on wall')}</small></span></button>
-        <button class="mat tool" data-tool="measure"><i style="background:#2f5d62"></i><span>${tr('测量','Measure')}<small>M</small></span></button>
-        <button class="mat tool" data-tool="demolish"><i style="background:#c65b3a"></i><span>${tr('拆墙','Demolish')}<small>X</small></span></button>
-      </div>
+    const catBtn = (key, bg, label, sub, hint) =>
+      `<button class="mat cat ${cat === key ? 'on' : ''}" data-cat="${key}" title="${hint || ''}">
+         <i style="background:${bg}"></i>
+         <span>${label}${sub ? `<small>${sub}</small>` : ''}</span>
+       </button>`;
 
-      <h4>${tr('墙类型','Wall type')}</h4>
-      <div class="lib-grid" style="grid-template-columns:1fr">
-        <button class="mat wall-kind ${ed.wallKind === 'n' ? 'on' : ''}" data-kind="n"><i style="background:#a7a195"></i><span>${tr('普通隔墙','Partition')}<small>${tr('非承重，可拆','Non-bearing')}</small></span></button>
-        <button class="mat wall-kind ${ed.wallKind === 'b' ? 'on' : ''}" data-kind="b"><i style="background:#26241f"></i><span>${tr('承重墙','Bearing')}<small>${tr('不可拆','Fixed')}</small></span></button>
-        <button class="mat wall-kind ${ed.wallKind === 'e' ? 'on' : ''}" data-kind="e"><i style="background:#8f897d"></i><span>${tr('外墙','Exterior')}<small>${tr('建筑外围护','Envelope')}</small></span></button>
-        <button class="mat wall-kind ${ed.wallKind === 'low' ? 'on' : ''}" data-kind="low"><i style="background:#e9e3d8;border:1px solid #ccc"></i><span>${tr('矮墙 / 栏板','Low wall')}<small>${tr('阳台用','Balcony')}</small></span></button>
-      </div>
+    const top =
+      `<h4>${tr('绘制工具','Draw tools')}</h4>
+       <div class="lib-grid" style="grid-template-columns:1fr">
+         ${catBtn('select',  '#e9e3d8', tr('选择','Select'),       'V',  tr('选择 / 拖动 / 编辑对象','V'))}
+         ${catBtn('wall',    '#a7a195', tr('画墙','Draw wall'),     'W',  tr('画墙 / 拆墙，二级菜单可选墙体类型','W'))}
+         ${catBtn('room',    '#2f5d62', tr('画房间','Draw room'),   'R',  tr('拖动绘制矩形房间','R'))}
+         ${catBtn('measure', '#2f5d62', tr('测量','Measure'),       'M',  tr('两点测量距离','M'))}
+         ${catBtn('opening', '#b5653a', tr('开门窗','Door / Window'),'D',  tr('开门 / 开窗，二级菜单切换','D'))}
+       </div>`;
 
-      <h4>${tr('墙厚','Wall thickness')} <small style="text-transform:none;font-weight:400">${ed.wallThickness} mm</small></h4>
-      <div class="form" style="padding:0 10px 10px">
-        <input type="range" min="60" max="400" step="10" value="${ed.wallThickness}" id="wallThk" style="grid-column:1/-1;accent-color:var(--edit)">
-      </div>
+    let sub = '';
+    if (cat === 'wall'){
+      const k = ed.wallKind;
+      const kindBtn = (kind, bg, label, hint) =>
+        `<button class="mat wall-kind ${k === kind ? 'on' : ''}" data-kind="${kind}">
+           <i style="background:${bg}"></i>
+           <span>${label}${hint ? `<small>${hint}</small>` : ''}</span>
+         </button>`;
+      sub =
+        `<h4>${tr('墙体类型','Wall type')}</h4>
+         <div class="lib-grid" style="grid-template-columns:1fr">
+           ${kindBtn('e',   '#8f897d', tr('外墙','Exterior'),       tr('建筑外围护','Envelope'))}
+           ${kindBtn('b',   '#26241f', tr('承重墙','Bearing'),      tr('不可拆','Fixed'))}
+           ${kindBtn('n',   '#a7a195', tr('隔墙','Partition'),      tr('非承重','Non-bearing'))}
+           ${kindBtn('low', '#e9e3d8', tr('矮墙 / 栏板','Low wall'),tr('阳台用','Balcony'))}
+           <button class="mat tool ${t === 'demolish' ? 'on' : ''}" data-tool="demolish">
+             <i style="background:#c65b3a"></i>
+             <span>${tr('拆墙','Demolish')}<small>${tr('在墙上点一下，可拖动 / 改宽度','click on wall')}</small></span>
+           </button>
+         </div>
+         <h4>${tr('墙厚','Wall thickness')} <small style="text-transform:none;font-weight:400">${ed.wallThickness} mm</small></h4>
+         <div class="form" style="padding:0 10px 10px">
+           <input type="range" min="60" max="400" step="10" value="${ed.wallThickness}" id="wallThk" style="grid-column:1/-1;accent-color:var(--edit)">
+         </div>`;
+    } else if (cat === 'opening'){
+      sub =
+        `<h4>${tr('门窗类型','Openings')}</h4>
+         <div class="lib-grid" style="grid-template-columns:1fr">
+           <button class="mat tool ${t === 'add-door' ? 'on' : ''}" data-tool="add-door">
+             <i style="background:#b5653a"></i>
+             <span>${tr('开门','Door')}<small>${tr('在墙上点一下','click on wall')}</small></span>
+           </button>
+           <button class="mat tool ${t === 'add-window' ? 'on' : ''}" data-tool="add-window">
+             <i style="background:#4f7394"></i>
+             <span>${tr('开窗','Window')}<small>${tr('在墙上点一下','click on wall')}</small></span>
+           </button>
+         </div>`;
+    }
 
-      <h4>${tr('当前工具参数','Current tool')}</h4>
-      <div class="hint">${tr('参数由左侧工具条与右侧属性面板共同控制。选择「开门 / 开窗 / 画墙」工具后，可直接在图上绘制；右侧面板会显示对应参数。', 'Parameters are shared with the tool and the right panel.')}</div>
-    </div>`;
+    return `<div id="lib">${top}${sub}</div>`;
   }
 
   _bindEdit(){
     const app = this.app;
     const ed = app.view2d.editor;
 
-    this.root.querySelectorAll('[data-tpl]').forEach(b => b.onclick = async () => {
-      const k = b.dataset.tpl;
-      if (k === 'load'){ $('#fileIn').click(); return; }
-      if (!confirm(tr('加载模板将覆盖当前户型，是否继续？（可撤销）', 'Loading a template will replace the current plan. Continue? (undoable)'))) return;
-      const { defaultPlanState, emptyState } = await import('../data/defaultLayout.js');
-      const s = k === 'empty' ? emptyState() : defaultPlanState();
-      app.select(null);
-      app.store.mutate('load template', () => Object.assign(app.store.state, s));
-      app.view2d.fit();
-      this.rebuild();
-      app.propPanel.render();
-      toast(tr('已加载', 'Loaded'));
+    /* 一级类别：setTool 会触发 libPanel.rebuild()，二级菜单动态展开 */
+    this.root.querySelectorAll('[data-cat]').forEach(b => b.onclick = () => {
+      const cat = b.dataset.cat;
+      if (cat === 'select')       app.setTool('select');
+      else if (cat === 'wall')    app.setTool('draw-wall');
+      else if (cat === 'room')    app.setTool('draw-room');
+      else if (cat === 'measure') app.setTool('measure');
+      else if (cat === 'opening') app.setTool('add-door');
     });
 
-    this.root.querySelectorAll('.tool').forEach(b => b.onclick = () => {
-      app.setTool(b.dataset.tool);
-      this._syncTools();
-    });
-
+    /* 二级：墙类型 */
     this.root.querySelectorAll('.wall-kind').forEach(b => b.onclick = () => {
       ed.wallKind = b.dataset.kind;
-      this.root.querySelectorAll('.wall-kind').forEach(x => x.classList.toggle('on', x === b));
-      app.view2d.syncEditHud();
-      app.propPanel.render();
+      app.setTool('draw-wall');
     });
 
+    /* 二级：拆墙 / 开门 / 开窗 */
+    this.root.querySelectorAll('.tool').forEach(b => b.onclick = () => {
+      app.setTool(b.dataset.tool);
+    });
+
+    /* 墙厚滑块：只更新数字，不重建面板，避免拖动中断 */
     const thk = this.root.querySelector('#wallThk');
     if (thk) thk.oninput = e => {
       ed.wallThickness = +e.target.value;
       app.view2d.syncEditHud();
-      this.rebuild();
+      const form = thk.closest('.form');
+      const h4 = form?.previousElementSibling;
+      const sm = h4?.querySelector('small');
+      if (sm) sm.textContent = ed.wallThickness + ' mm';
     };
-
-    this._syncTools();
-  }
-
-  _syncTools(){
-    const cur = this.app.ui.tool;
-    this.root.querySelectorAll('.tool').forEach(x => x.classList.toggle('on', x.dataset.tool === cur));
   }
 }

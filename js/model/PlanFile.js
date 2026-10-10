@@ -47,9 +47,10 @@ export function normalizePlan(p){
 
 export function normalizeLayout(l){
   return {
-    furniture:  Array.isArray(l?.furniture)  ? l.furniture  : [],
-    demolished: Array.isArray(l?.demolished) ? l.demolished : [],
-    measures:   Array.isArray(l?.measures)   ? l.measures   : [],
+    furniture:    Array.isArray(l?.furniture)    ? l.furniture    : [],
+    demolished:   Array.isArray(l?.demolished)   ? l.demolished   : [],
+    demolitions:  Array.isArray(l?.demolitions)  ? l.demolitions  : [],
+    measures:     Array.isArray(l?.measures)     ? l.measures     : [],
   };
 }
 

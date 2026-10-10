@@ -35,6 +35,9 @@ export class PlanView {
     this._stage = 'layout';
     this._fitDone = false;
 
+    this._cursorEl = document.getElementById('toolCursor');
+    this._radialTimer = null;
+
     this.editor = {
       wallKind: 'n',
       wallThickness: 240,
@@ -153,8 +156,8 @@ export class PlanView {
   renderWalls(){
     const { plan, layout } = this.app.store.state;
     const bearing = this.app.ui.layers.bearing;
-    const dem = this.isEdit ? [] : (layout.demolished || []);
-    $('#gWalls').innerHTML = (plan.walls || []).map((w, i) => {
+    const dem = layout.demolished || [];
+    let s = (plan.walls || []).map((w, i) => {
       // 数值校验，防止 NaN 渗透到 SVG
       if (!w
         || !Number.isFinite(+w.x0) || !Number.isFinite(+w.y0)
@@ -174,6 +177,21 @@ export class PlanView {
       }
       return `<polygon class="wall" data-wall="${id}" points="${poly.map(p => p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ')}" fill="${fill}" ${ex}/>`;
     }).join('');
+
+    /* ---- 拆除段：附着在宿主墙上的可选中片段，实时显示 ---- */
+    (layout.demolitions || []).forEach(dm => {
+      if (!dm
+        || !Number.isFinite(+dm.x0) || !Number.isFinite(+dm.y0)
+        || !Number.isFinite(+dm.x1) || !Number.isFinite(+dm.y1)) return;
+      if (Math.hypot(+dm.x1 - +dm.x0, +dm.y1 - +dm.y0) < 1) return;
+      const t = dm.t || 240;
+      const poly = linearPoly({ x0:+dm.x0, y0:+dm.y0, x1:+dm.x1, y1:+dm.y1, t });
+      if (!poly) return;
+      const pts = poly.map(p => p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+      s += `<polygon class="demolition" data-dem="${dm.id}" points="${pts}" fill="rgba(198,91,58,.22)" stroke="#c65b3a" stroke-width="1.2" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"/>`;
+    });
+
+    $('#gWalls').innerHTML = s;
   }
 
   /**
@@ -503,6 +521,9 @@ export class PlanView {
     } else if (sel?.kind === 'window'){
       const w = (this.app.store.state.plan.windows || []).find(x => x.id === sel.id);
       if (w) s += this._selLinear(w, '#4f7394', R, HIT, 'window');
+    } else if (sel?.kind === 'demolition'){
+      const d = (this.app.store.state.layout.demolitions || []).find(x => x.id === sel.id);
+      if (d) s += this._selLinear(d, '#c65b3a', R, HIT, 'demolition');
     } else if (sel?.kind === 'room'){
       const r = (this.app.store.state.plan.rooms || []).find(x => x.id === sel.id);
       if (r){
@@ -546,7 +567,11 @@ export class PlanView {
     if (!poly) return '';
     const pstr = poly.map(p => p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
     const L = Math.round(linearLength(el));
-    const tag = kind === 'wall' ? `L=${L} t=${el.t}` : kind === 'door' ? `门 ${L} t=${el.t}` : `窗 ${L} t=${el.t}`;
+    const tag = kind === 'wall' ? `L=${L} t=${Math.round(el.t)}`
+      : kind === 'door' ? tr(`门 ${L}`, `Door ${L}`)
+      : kind === 'window' ? tr(`窗 ${L}`, `Window ${L}`)
+      : kind === 'demolition' ? tr(`拆 ${L}`, `Dem ${L}`)
+      : `L=${L}`;
     const mx = (el.x0 + el.x1)/2, my = (el.y0 + el.y1)/2 - 220/viewFromHack(this.vp);
     return `
       <polygon points="${pstr}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>
@@ -615,7 +640,24 @@ export class PlanView {
     }
     this.app.ui.tool = t;
     this.svg.setAttribute('class', 'tool-' + t);
+    // 光标样式（至少直观提示当前工具）
+    const cursors = {
+      select: 'default',
+      'draw-wall': 'crosshair',
+      'draw-room': 'crosshair',
+      'auto-room': 'pointer',
+      measure: 'crosshair',
+      'add-door': 'crosshair',
+      'add-window': 'crosshair',
+      demolish: 'pointer',
+    };
+    this.svg.style.cursor = cursors[t] || 'default';
     this.syncModeHint();
+    // 切工具时同步刷新光标标签
+    if (this._lastPos){
+      const r = this.svg.getBoundingClientRect();
+      this._updateToolCursor(this._lastPos._cx ?? 0, this._lastPos._cy ?? 0);
+    }
     this.syncEditHud();
     this.renderMeasure();
     this.renderSel();
@@ -751,13 +793,33 @@ export class PlanView {
     return best;
   }
 
+  hitDemolition(p){
+    const { layout } = this.app.store.state;
+    let best = null, bestD = 30 / this.vp.s;
+    (layout.demolitions || []).forEach(d => {
+      const dd = distToSeg(p.x, p.y, d.x0, d.y0, d.x1, d.y1);
+      if (dd < bestD){ bestD = dd; best = d; }
+    });
+    return best;
+  }
+
   /* =========================== 交互 =========================== */
   _bind(){
     const svg = this.svg;
     if (!svg){ console.error('[PV] #plan 未找到'); return; }
 
     svg.addEventListener('pointerdown', e => {
-      if (e.button === 1 || e.button === 2) return;
+      /* 中键长按 → 快捷轮盘 */
+      if (e.button === 1){
+        e.preventDefault();
+        clearTimeout(this._radialTimer);
+        this._radialTimer = setTimeout(() => {
+          this._radialTimer = null;
+          this.app.showRadial(e.clientX, e.clientY);
+        }, 400);
+        return;
+      }
+      if (e.button === 2) return;
       $$('details.menu[open]').forEach(m => m.open = false);
       if (e.pointerType !== 'mouse'){
         this.touches.set(e.pointerId, { x:e.clientX, y:e.clientY });
@@ -774,6 +836,7 @@ export class PlanView {
     });
 
     svg.addEventListener('pointermove', e => {
+      if (e.pointerType !== 'touch') this._updateToolCursor(e.clientX, e.clientY);
       if (this.touches.has(e.pointerId)) this.touches.set(e.pointerId, { x:e.clientX, y:e.clientY });
       if (this.pinch){
         if (this.touches.size < 2) return;
@@ -788,9 +851,20 @@ export class PlanView {
       this._pointerMove(e);
     });
 
-    const end = e => this._pointerEnd(e, e.type === 'pointercancel');
+    const end = e => {
+      if (e.button === 1 && this._radialTimer){
+        clearTimeout(this._radialTimer);
+        this._radialTimer = null;
+      }
+      this._pointerEnd(e, e.type === 'pointercancel');
+    };
     svg.addEventListener('pointerup', end);
     svg.addEventListener('pointercancel', end);
+
+    svg.addEventListener('pointerleave', () => this._cursorEl?.classList.remove('show'));
+    svg.addEventListener('pointerenter', e => {
+      if (e.pointerType !== 'touch') this._updateToolCursor(e.clientX, e.clientY);
+    });
     ['gesturestart','gesturechange','gestureend'].forEach(t => document.addEventListener(t, e => e.preventDefault()));
 
     svg.addEventListener('wheel', e => {
@@ -803,12 +877,12 @@ export class PlanView {
       if (this.app.ui.tool === 'select' && e.target.closest('[data-fid]')) this.rotateSel(90);
     });
     svg.addEventListener('contextmenu', e => {
-      if (this.app.ui.tool === 'measure'){ e.preventDefault(); this.app.ui.mA = null; this.renderMeasure(); return; }
+      // 画布区域完全屏蔽浏览器默认右键菜单
+      e.preventDefault();
 
-      // 右键房间顶点 → 删除该顶点
+      // 右键房间顶点 → 删除该顶点（优先）
       const h = e.target.closest('[data-handle="room-vertex"]');
       if (h && this.app.ui.sel?.kind === 'room'){
-        e.preventDefault();
         const r = (this.app.store.state.plan.rooms || []).find(x => x.id === this.app.ui.sel.id);
         if (!r) return;
         if (r.poly.length <= 3){
@@ -820,8 +894,51 @@ export class PlanView {
           const t2 = s.plan.rooms.find(x => x.id === roomId);
           if (t2 && t2.poly.length > 3) t2.poly.splice(idx, 1);
         });
+        return;
+      }
+
+      // 右键任意位置：清掉当前绘制/测量状态，统一回到「选择」工具
+      const hadPending = this.app.ui.mA || this.app.ui.tool !== 'select';
+      if (hadPending){
+        this.app.ui.mA = null;
+        this.app.ui.mCur = null;
+        this.renderMeasure();
+        if (this.app.ui.tool !== 'select'){
+          this.app.setTool('select');
+          toast(tr('已返回选择工具', 'Returned to Select'));
+        }
       }
     });
+  }
+
+  /* 光标附近的小文字提示（跟随鼠标） */
+  _updateToolCursor(x, y){
+    const el = this._cursorEl;
+    if (!el) return;
+    const t = this.app.ui.tool;
+    const isEdit = this.isEdit;
+    if (!isEdit){
+      el.classList.remove('show');
+      return;
+    }
+    const ed = this.editor;
+    const kindZh = { n:'隔墙', b:'承重墙', e:'外墙', low:'矮墙' }[ed.wallKind] || '';
+    const labels = {
+      'select':     tr('选择 · 拖动对象', 'Select'),
+      'draw-wall':  tr(`画墙 · ${kindZh} · 厚 ${ed.wallThickness}mm · Shift 锁定`, `Wall`),
+      'draw-room':  tr('画房间 · 拖动框选', 'Room'),
+      'auto-room':  tr('智能房间 · 点击识别', 'Smart room'),
+      'measure':    tr('测量 · 点两点 · Shift 锁定正交', 'Measure'),
+      'add-door':   tr('开门 · 在墙上点一下', 'Door'),
+      'add-window': tr('开窗 · 在墙上点一下', 'Window'),
+      'demolish':   tr('拆墙 · 在墙上点一下，可拖动改宽', 'Demolish'),
+    };
+    const txt = labels[t];
+    if (!txt){ el.classList.remove('show'); return; }
+    el.textContent = txt;
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    el.classList.add('show');
   }
 
   _pinchInfo(){
@@ -862,6 +979,14 @@ export class PlanView {
       const hit = this.pickWall(p.x, p.y);
       if (!hit){ toast(tr('请点击一堵墙体', 'Click on a wall')); return; }
       tool === 'add-door' ? this._placeDoor(hit, p) : this._placeWindow(hit, p);
+      return;
+    }
+
+    /* ---- 拆墙：在墙上点一下，生成可拖动/可改宽的拆除段 ---- */
+    if (tool === 'demolish'){
+      const hit = this.pickWall(p.x, p.y);
+      if (!hit){ toast(tr('请点击一堵墙体', 'Click on a wall')); return; }
+      this._placeDemolition(hit, p);
       return;
     }
 
@@ -924,7 +1049,7 @@ export class PlanView {
 
     /* ---- 端点控制点 ---- */
     const handle = t.closest('[data-handle]');
-    if (handle?.dataset.handle === 'linear-end' && (this.app.ui.sel?.kind === 'wall' || this.app.ui.sel?.kind === 'door' || this.app.ui.sel?.kind === 'window')){
+    if (handle?.dataset.handle === 'linear-end' && (this.app.ui.sel?.kind === 'wall' || this.app.ui.sel?.kind === 'door' || this.app.ui.sel?.kind === 'window' || this.app.ui.sel?.kind === 'demolition')){
       const sel = this.app.ui.sel;
       const el = this._selEntity(sel);
       if (el){
@@ -944,11 +1069,6 @@ export class PlanView {
       return;
     }
 
-    if (tool === 'demolish' && t.closest('[data-wall]')){
-      this.toggleWall(t.closest('[data-wall]').dataset.wall);
-      return;
-    }
-
     if (tool === 'select' && !this.isEdit && t.closest('[data-fid]')){
       const f = this.app.store.getFurniture(t.closest('[data-fid]').dataset.fid);
       if (this.app.ui.sel?.id !== f.id) this.app.select({ kind:'furn', id:f.id });
@@ -960,6 +1080,13 @@ export class PlanView {
     if (tool === 'select'){
       // 装修布置阶段：锁定硬装（墙/门/窗），只允许操作家具和房间
       if (this.isEdit){
+        const hitDm = this.hitDemolition(p);
+        if (hitDm){
+          this.app.select({ kind:'demolition', id: hitDm.id });
+          this.drag = { kind:'drag-demolition', id:hitDm.id, sx:e.clientX, sy:e.clientY, before:this.app.store.snapshot(), moved:false };
+          try { this.svg.setPointerCapture(e.pointerId); } catch {}
+          return;
+        }
         const hitD = this.hitDoor(p);
         if (hitD){
           this.app.select({ kind:'door', id: hitD.id });
@@ -992,10 +1119,11 @@ export class PlanView {
   }
 
   _selEntity(sel){
-    const { plan } = this.app.store.state;
+    const { plan, layout } = this.app.store.state;
     if (sel.kind === 'wall') return (plan.walls || []).find(x => x.id === sel.id);
     if (sel.kind === 'door') return (plan.doors || []).find(x => x.id === sel.id);
     if (sel.kind === 'window') return (plan.windows || []).find(x => x.id === sel.id);
+    if (sel.kind === 'demolition') return (layout.demolitions || []).find(x => x.id === sel.id);
     return null;
   }
 
@@ -1188,11 +1316,13 @@ export class PlanView {
     }
 
     /* ---- 门/窗沿墙滑动（拖身） ---- */
-    if (this.drag.kind === 'drag-door' || this.drag.kind === 'drag-window'){
+    if (this.drag.kind === 'drag-door' || this.drag.kind === 'drag-window' || this.drag.kind === 'drag-demolition'){
       if (!this.drag.moved && !far) return;
       this.drag.moved = true;
-      const { plan } = this.app.store.state;
-      const list = this.drag.kind === 'drag-door' ? plan.doors : plan.windows;
+      const { plan, layout } = this.app.store.state;
+      const list = this.drag.kind === 'drag-door' ? plan.doors
+                 : this.drag.kind === 'drag-window' ? plan.windows
+                 : layout.demolitions;
       const el = (list || []).find(x => x.id === this.drag.id);
       if (!el) return;
       let wall = el.hostWall ? plan.walls.find(x => x.id === el.hostWall) : null;
@@ -1220,7 +1350,7 @@ export class PlanView {
         nx1 = proj.x + dir[0] * half; ny1 = proj.y + dir[1] * half;
       }
       el.x0 = nx0; el.y0 = ny0; el.x1 = nx1; el.y1 = ny1;
-      this.renderOpenings(); this.renderSel();
+      this.renderWalls(); this.renderOpenings(); this.renderSel();
       return;
     }
 
@@ -1304,7 +1434,7 @@ export class PlanView {
       return;
     }
 
-    if (d.kind === 'linear-end' || d.kind === 'drag-wall' || d.kind === 'drag-door' || d.kind === 'drag-window' || d.kind === 'room-vertex'){
+    if (d.kind === 'linear-end' || d.kind === 'drag-wall' || d.kind === 'drag-door' || d.kind === 'drag-window' || d.kind === 'drag-demolition' || d.kind === 'room-vertex'){
       if (d.moved && d.before){
         this.app.store.commitWith(d.before, 'edit');
         this.renderAll();
@@ -1431,6 +1561,37 @@ export class PlanView {
     this.app.store.mutate('add window', s => s.plan.windows.push(win));
     this.app.select({ kind:'window', id:win.id });
     toast(tr(`已放置窗 ${Math.round(len)}mm`, `Window ${Math.round(len)}mm`));
+  }
+
+  _placeDemolition(hit, p){
+    const w = hit.wall;
+    if (w.kind === 'b'){ toast(tr('承重墙不可拆除', 'Load-bearing walls cannot be demolished')); return; }
+    if (w.kind === 'e'){ toast(tr('外墙不建议拆除', 'Exterior walls are usually kept')); return; }
+    const wallLen = linearLength(w);
+    const maxLen = wallLen - 20;
+    const len = Math.min(900, maxLen);
+    if (len < 100){ toast(tr('墙体太短', 'Wall too short')); return; }
+    const proj = pointOnLine(p, w);
+    const dir = linearDir(w);
+    const half = len / 2;
+    const tMin = half / wallLen;
+    const tMax = 1 - half / wallLen;
+    const t = Math.max(tMin, Math.min(tMax, proj.t));
+    const cx = w.x0 + (w.x1 - w.x0) * t;
+    const cy = w.y0 + (w.y1 - w.y0) * t;
+    const dm = {
+      id: 'dm_' + uid(),
+      hostWall: w.id,
+      x0: cx - dir[0] * half, y0: cy - dir[1] * half,
+      x1: cx + dir[0] * half, y1: cy + dir[1] * half,
+      t: w.t || 240,
+    };
+    this.app.store.mutate('add demolition', s => {
+      s.layout.demolitions = s.layout.demolitions || [];
+      s.layout.demolitions.push(dm);
+    });
+    this.app.select({ kind:'demolition', id:dm.id });
+    toast(tr(`已标记拆除 ${Math.round(len)}mm`, `Demolition ${Math.round(len)}mm`));
   }
 
   addItem(it, x, y){

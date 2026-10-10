@@ -28,6 +28,9 @@ export class StageManager {
     }
     this.current = name;
     document.getElementById('app').dataset.stage = name;
+    // 切阶段时清掉可能残留的光标标签与轮盘
+    document.getElementById('toolCursor')?.classList.remove('show');
+    this.app.hideRadial?.();
     this.syncBadge();
     this.app.toolbar?.rebuild();
     this.app.libPanel?.mount();

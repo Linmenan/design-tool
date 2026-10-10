@@ -182,8 +182,9 @@ export class Scene3D {
       const b = Math.max(t1, t2) * wLen;
       if (b - a < 1) return;
       const isDoor = op.kind === 'door';
-      const sill = isDoor ? 0 : Math.max(0, (op.sill || 900) / 1000);
-      const head = isDoor ? Math.min(2.05, top) : Math.min(2.4, top);
+      const isDem  = op.kind === 'demolition';
+      const sill = (isDoor || isDem) ? 0 : Math.max(0, (op.sill || 900) / 1000);
+      const head = isDem ? top : (isDoor ? Math.min(2.05, top) : Math.min(2.4, top));
       holes.push({
         tMin: Math.max(0, a),
         tMax: Math.min(wLen, b),
@@ -287,6 +288,12 @@ export class Scene3D {
         return;
       }
       const openings = this._openingsOnWall(w, plan);
+      // 拆除段视作全高洞口（贯通到顶）
+      (layout.demolitions || []).forEach(dm => {
+        if (dm && dm.hostWall === w.id){
+          openings.push({ kind:'demolition', x0:dm.x0, y0:dm.y0, x1:dm.x1, y1:dm.y1 });
+        }
+      });
       this._buildWallWithOpenings(w, openings, top);
     });
 

@@ -41,11 +41,6 @@ export class Toolbar {
         <button class="btn" data-view="2d">${tr('2D 平面','2D Plan')}</button>
         <button class="btn" data-view="3d">${tr('3D 场景','3D Scene')}</button>
       </div>
-      <div class="grp only2d" id="tools">
-        <button class="btn on" data-tool="select">${tr('选择','Select')}</button>
-        <button class="btn" data-tool="measure">${tr('测量','Measure')}</button>
-        <button class="btn" data-tool="demolish">${tr('拆改墙体','Demolish')}</button>
-      </div>
       <div class="grp only2d">
         <button class="btn" id="zoomOut">−</button>
         <button class="btn" id="zoomIn">＋</button>
@@ -112,15 +107,6 @@ export class Toolbar {
         <button class="btn" data-stage="layout">${tr('② 装修布置','2 Layout')}</button>
       </div>
       <div class="brand"><b>${tr('户型编辑器','Plan Editor')}</b><span id="subtitle"></span></div>
-      <div class="grp" id="editTools">
-        <button class="btn on" data-tool="select">${tr('选择','Select')}</button>
-        <button class="btn" data-tool="draw-wall">${tr('画墙','Wall')}</button>
-        <button class="btn" data-tool="draw-room">${tr('画房间','Room')}</button>
-        <button class="btn" data-tool="add-door">${tr('开门','Door')}</button>
-        <button class="btn" data-tool="add-window">${tr('开窗','Window')}</button>
-        <button class="btn" data-tool="measure">${tr('测量','Measure')}</button>
-        <button class="btn" data-tool="demolish">${tr('拆墙','Demolish')}</button>
-      </div>
       <div class="grp">
         <button class="btn" id="zoomOut">−</button>
         <button class="btn" id="zoomIn">＋</button>
@@ -133,9 +119,8 @@ export class Toolbar {
         <button class="btn" id="redo">${tr('重做','Redo')}</button>
       </div>
       <div class="grp" id="layers">
-        <button class="btn chip on" data-layer="dims">${tr('尺寸','Dims')}</button>
-        <button class="btn chip" data-layer="autoDims" title="${tr('按房间自动生成尺寸链','Auto room dimension chains')}">${tr('房间尺寸','Room dims')}</button>
-        <button class="btn chip on" data-layer="labels">${tr('房间','Rooms')}</button>
+        <button class="btn chip" data-layer="autoDims">${tr('房间尺寸','Room dims')}</button>
+        <button class="btn chip on" data-layer="labels">${tr('房间名称','Room names')}</button>
         <button class="btn chip" data-layer="grid">${tr('网格','Grid')}</button>
         <button class="btn chip" data-layer="bearing">${tr('承重墙','Bearing')}</button>
       </div>
@@ -147,6 +132,7 @@ export class Toolbar {
           <button class="btn" data-act="switch-layout">${tr('→ 装修布置','→ Layout')}</button>
           <hr>
           <button class="btn" id="newPlan">${tr('新建空白户型','New blank plan')}</button>
+          <button class="btn" id="loadDefault">${tr('加载内置默认户型','Load default plan')}</button>
           <button class="btn" id="loadPlan">${tr('加载户型文件…','Load .plan.json…')}</button>
           <button class="btn" id="savePlan">${tr('保存户型文件','Save .plan.json')}</button>
           <hr>
@@ -166,7 +152,7 @@ export class Toolbar {
   _bind(){
     const app = this.app;
 
-    $$('#tools .btn, #editTools .btn').forEach(b => b.onclick = () => app.setTool(b.dataset.tool));
+    // 编辑 / 装修阶段的绘图工具已迁移到左侧面板（LibraryPanel），顶部只留视图与操作
     $('#zoomIn')  && ($('#zoomIn').onclick  = () => app.viewport.zoomBy(1.25));
     $('#zoomOut') && ($('#zoomOut').onclick = () => app.viewport.zoomBy(.8));
     $('#fit')     && ($('#fit').onclick     = () => app.view2d.fit());
@@ -182,9 +168,10 @@ export class Toolbar {
     $$('#viewSeg .btn').forEach(b => b.onclick = () => app.setViewMode(b.dataset.view));
 
     // 编辑阶段：新建/加载/保存
-    $('#newPlan')  && ($('#newPlan').onclick  = () => this._newPlan());
-    $('#loadPlan') && ($('#loadPlan').onclick = () => $('#fileIn').click());
-    $('#savePlan') && ($('#savePlan').onclick = () => this._savePlan());
+    $('#newPlan')     && ($('#newPlan').onclick     = () => this._newPlan());
+    $('#loadDefault') && ($('#loadDefault').onclick = () => this._loadDefaultPlan());
+    $('#loadPlan')    && ($('#loadPlan').onclick    = () => $('#fileIn').click());
+    $('#savePlan')    && ($('#savePlan').onclick    = () => this._savePlan());
 
     $('#exportPng')  && ($('#exportPng').onclick  = () => this._exportPNG());
     $('#exportJson') && ($('#exportJson').onclick = () => this._exportJson());
@@ -235,8 +222,6 @@ export class Toolbar {
     if (u){ u.disabled = !app.store.canUndo(); u.style.opacity = app.store.canUndo() ? 1 : .4; }
     if (r){ r.disabled = !app.store.canRedo(); r.style.opacity = app.store.canRedo() ? 1 : .4; }
 
-    $$('#tools .btn, #editTools .btn').forEach(b => b.classList.toggle('on', b.dataset.tool === app.ui.tool));
-
     if (app.view.mode === '3d'){
       $$('#viewSeg .btn').forEach(b => b.classList.toggle('on', b.dataset.view === '3d'));
       document.body.classList.add('m3d');
@@ -279,6 +264,18 @@ export class Toolbar {
     });
     this.app.view2d.fit();
     toast(tr('已新建空白户型', 'Blank plan created'));
+  }
+
+  async _loadDefaultPlan(){
+    if (!confirm(tr('加载内置默认户型将覆盖当前户型（可撤销），是否继续？', 'Load the built-in default plan? (undoable)'))) return;
+    const { defaultPlanState } = await import('../data/defaultLayout.js');
+    this.app.select(null);
+    this.app.store.mutate('load default plan', () => {
+      const s = defaultPlanState();
+      Object.assign(this.app.store.state, s);
+    });
+    this.app.view2d.fit();
+    toast(tr('已加载内置默认户型', 'Default plan loaded'));
   }
 
     async _savePlan(){
