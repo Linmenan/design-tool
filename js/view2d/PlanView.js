@@ -142,10 +142,18 @@ export class PlanView {
 
   renderFurn(){
     const g = $('#gFurn');
-    const show = !this.isEdit && this.app.ui.layers.furn;
-    g.setAttribute('display', show ? 'inline' : 'none');
-    if (!show){ g.innerHTML = ''; return; }
-    g.innerHTML = (this.app.store.state.layout.furniture || []).map(f => {
+    /* 家具 / 灯具是两个独立开关：
+       - 家具开关只管非灯具家具；
+       - 灯具开关只管天花板灯具（CEILING_TYPES）；
+       两者都关时不渲染任何东西。 */
+    const showFurn = !this.isEdit && this.app.ui.layers.furn;
+    const showLamp = !this.isEdit && this.app.ui.layers.lamps;
+    if (!showFurn && !showLamp){ g.setAttribute('display', 'none'); g.innerHTML = ''; return; }
+    g.setAttribute('display', 'inline');
+    g.innerHTML = (this.app.store.state.layout.furniture || []).filter(f => {
+      const isLamp = CEILING_TYPES.has(f.type);
+      return isLamp ? showLamp : showFurn;
+    }).map(f => {
       const fs = Math.max(80, Math.min(170, Math.min(f.w, f.d) * .2));
       const label = Math.min(f.w, f.d) >= 380 && !NOLABEL.includes(f.type)
         ? `<text transform="rotate(${-f.rot})" font-size="${fs}" text-anchor="middle" dominant-baseline="central" fill="#4a443c" opacity=".8" pointer-events="none">${esc(nm(f.name))}</text>` : '';

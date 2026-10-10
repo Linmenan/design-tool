@@ -6,6 +6,13 @@ import { cloneDefaultPlan, emptyPlan } from './planData.js';
 export const F = (type, name, cx, cy, w, d, rot = 0, color) =>
   ({ id: uid(), type, name, cx, cy, w, d, rot, color: color || typeColor(type) });
 
+/** 便捷构造灯具对象（含 lamp 光照属性） */
+export const L = (type, name, cx, cy, w, d, opts = {}) => {
+  const f = F(type, name, cx, cy, w, d, opts.rot || 0, opts.color);
+  f.lamp = opts.lamp || { intensity: 1, color: opts.color || '#ffd9a8' };
+  return f;
+};
+
 /* ============================================================
  *  三种状态：完整方案 / 纯户型 / 空
  * ============================================================ */
@@ -71,6 +78,20 @@ export function defaultFurniture(){ return [
   F('desk','书桌',9500,6070,1200,600,180), F('chair','椅子',9500,5480,450,480), F('baycushion','飘窗垫',10770,4997,520,1575),
   F('roundtable','茶桌',11180,8200,600,600), F('armchair','休闲椅',11180,7520,750,750,0,'#d6b99a'),
   F('armchair','休闲椅',11180,8880,750,750,180,'#d6b99a'), F('plant','绿植',11550,10250,500,500),
+
+  /* 灯具：每个主要房间一盏，位于房间中心（对应 poly 的中心 at） */
+  L('ceilround','圆形吸顶灯', 8435, 2420, 600, 600,  { lamp:{ intensity:1.0, color:'#ffd9a8' } }), // 主卧室
+  L('ceilround','圆形吸顶灯', 5980, 1780, 450, 450,  { lamp:{ intensity:0.7, color:'#ffd9a8' } }), // 主卫浴
+  L('ceilround','圆形吸顶灯', 3380, 2330, 550, 550,  { lamp:{ intensity:0.9, color:'#ffd9a8' } }), // 小孩房
+  L('ceilround','圆形吸顶灯', 3760, 4620, 450, 450,  { lamp:{ intensity:0.7, color:'#ffd9a8' } }), // 客卫浴
+  L('ceilround','圆形吸顶灯', 1250, 4330, 350, 350,  { lamp:{ intensity:0.6, color:'#fff4dc' } }), // 洗衣阳台
+  L('ceilround','圆形吸顶灯', 8850, 4850, 550, 550,  { lamp:{ intensity:0.9, color:'#ffd9a8' } }), // 子女房
+  L('ceilround','圆形吸顶灯', 1300, 6500, 450, 450,  { lamp:{ intensity:0.8, color:'#fff4dc' } }), // 厨房
+  L('ceilround','圆形吸顶灯', 3900, 5520, 600, 600,  { lamp:{ intensity:0.9, color:'#ffd9a8' } }), // 餐厅
+  L('downlight','筒灯',       5450, 3500, 120, 120,  { lamp:{ intensity:1.0, color:'#fff4dc' } }), // 过道 1
+  L('downlight','筒灯',       5450, 5500, 120, 120,  { lamp:{ intensity:1.0, color:'#fff4dc' } }), // 过道 2
+  L('ceilsquare','方形吸顶灯', 7600, 7560, 800, 800, { lamp:{ intensity:1.2, color:'#ffd9a8' } }), // 客厅
+  L('ceilround','圆形吸顶灯', 11180, 9450, 400, 400, { lamp:{ intensity:0.7, color:'#fff4dc' } }), // 休闲阳台
 ];}
 
 export const emptyFurniture = () => [];

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { CSS2DRenderer, CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js';
 import { $, toast } from '../core/Utils.js';
 import { tr } from '../core/I18n.js';
 import { CEILING_TYPES } from '../data/furnitureLib.js';
@@ -32,7 +33,7 @@ const TEX = {
 export class Scene3D {
   constructor(app){
     this.app = app;
-    this.opt = { cut: H, furn: true, labels: true, night: false, hour: 10, month: 6, day: 21, mode: 'orbit' };
+    this.opt = { cut: H, furn: true, lamps: true, labels: true, night: false, hour: 10, month: 6, day: 21, mode: 'orbit' };
     this.active = false;
     this.inited = false;
     this.anim = null;
@@ -1072,13 +1073,21 @@ export class Scene3D {
 
     this.archFloor = new THREE.Group();
     this.archUp    = new THREE.Group();
-    this.furnG     = new THREE.Group();
-    this.lampG     = new THREE.Group();
+    this.furnG     = new THREE.Group();          // 家具 mesh（不含灯具）
+    this.lampG     = new THREE.Group();          // 灯具 mesh（可见模型）
+    this.lightG    = new THREE.Group();          // 光源容器：永远 visible，独立于灯具模型
+    this.labelG    = new THREE.Group();          // 房间名标签
     this.ceilingG  = new THREE.Group();          // 只投阴影、不渲染颜色（视角仍可穿透）
     this.ceilMat = new THREE.MeshBasicMaterial({
       color: 0xffffff, colorWrite: false, depthWrite: false, side: THREE.DoubleSide,
     });
-    scene.add(this.archFloor, this.archUp, this.furnG, this.lampG, this.ceilingG);
+    scene.add(this.archFloor, this.archUp, this.furnG, this.lampG, this.lightG, this.labelG, this.ceilingG);
+
+    /* CSS2D 标签渲染器：叠加在 WebGL canvas 之上，用于显示房间名 */
+    const lr = this.labelRenderer = new CSS2DRenderer();
+    lr.setSize(this.SW(), this.SH());
+    Object.assign(lr.domElement.style, { position:'absolute', inset:'0', pointerEvents:'none', zIndex:'2' });
+    host.appendChild(lr.domElement);
 
     /* ---- 点击门开合 ---- */
     let downAt = null;
@@ -1098,6 +1107,7 @@ export class Scene3D {
     new ResizeObserver(() => {
       if (!this.renderer) return;
       renderer.setSize(this.SW(), this.SH());
+      if (this.labelRenderer) this.labelRenderer.setSize(this.SW(), this.SH());
       camera.aspect = this.SW() / this.SH();
       camera.updateProjectionMatrix();
     }).observe(stage);
@@ -1570,9 +1580,12 @@ export class Scene3D {
   /* ---------- 家具 ---------- */
   buildFurn(){
     /* 清理旧灯（含 SpotLight 目标） */
-    (this.lamps || []).forEach(l => { if (l.target) this.scene.remove(l.target); });
+    (this.lamps || []).forEach(entry => {
+      (entry.targets || []).forEach(t => this.scene.remove(t));
+    });
     this._clear(this.furnG);
     this._clear(this.lampG);
+    this._clear(this.lightG);
     this.lamps = [];
 
     (this.app.store.state.layout.furniture || []).forEach(f => {
@@ -1587,12 +1600,17 @@ export class Scene3D {
       g.traverse(o => { o.userData.fid = f.id; });
       this.furnG.add(g);
     });
-    this.furnG.visible = this.opt.furn;
-    this.lampG.visible = this.opt.furn;
 
-    /* 应用夜景 / 家具开关到所有新灯 */
-    (this.lamps || []).forEach(l => {
-      l.light.intensity = (this.opt.night && this.opt.furn) ? l.baseIntensity : 0;
+    /* 家具与灯具模型分别由独立开关控制；光源容器 lightG 永远 visible。 */
+    this.furnG.visible  = !!this.opt.furn;
+    this.lampG.visible  = !!this.opt.lamps;
+    this.lightG.visible = true;      // 光源容器始终可见，显隐只由夜景开关的强度控制
+
+    /* 夜景开关 → 光源强度 */
+    (this.lamps || []).forEach(entry => {
+      entry.lights.forEach(l => {
+        l.light.intensity = this.opt.night ? l.base : 0;
+      });
     });
 
     this._applyGrow();
@@ -1609,8 +1627,15 @@ export class Scene3D {
   }
 
   /**
-   * 生成一盏天花板灯：可见灯体 + PointLight / SpotLight。
-   * 位置固定在 H（层高）下方；拖动灯具在 2D 中改变 cx / cy 即可。
+   * 生成一盏天花板灯。
+   * - 灯体 Mesh 按类型不同；
+   * - 光源按形状分布（不是单点），让"光源形状"跟灯具一致：
+   *     圆形吸顶灯 → 1 中心 + 4 环 = 5 个 PointLight
+   *     方形吸顶灯 → 2×2 网格 = 4 个 PointLight
+   *     灯带       → 沿长边 3~6 个 PointLight
+   *     筒灯       → 1 个 PointLight（短距）
+   *     射灯       → 1 个 SpotLight（锥形）
+   * - 位置固定在 H（层高）下方；拖动灯具在 2D 中改变 cx / cy 即可。
    */
   _buildCeilingLight(f){
     const w = this.M(f.w), d = this.M(f.d);
@@ -1621,43 +1646,71 @@ export class Scene3D {
     const intensity = Math.max(.2, Math.min(3, lamp.intensity ?? 1));
     const y = H - 0.02;
     const mat = this._mat('#fbfbf9', { emissive: new THREE.Color(hex), emissiveIntensity: .55, roughness: .5 });
+    const lights = [];          // [{ light, base }]
+    const targets = [];         // SpotLight 目标
 
-    let mesh = null, lightObj = null, target = null;
-    let baseIntensity = intensity * 4;
+    /** 在某位置加一个 PointLight，base 是该灯的基准强度 */
+    const addPoint = (x, yPos, z, base, dist) => {
+      const pl = new THREE.PointLight(new THREE.Color(hex), 0, dist, 1.4);
+      pl.position.set(x, yPos, z);
+      pl.userData.fid = f.id;
+      pl.castShadow = false;
+      lights.push({ light: pl, base });
+    };
+
+    let mesh = null;
 
     switch (f.type){
       case 'ceilround': {
         const r = Math.min(w, d) / 2;
         mesh = this._mesh(new THREE.CylinderGeometry(r, r * .95, .05, 24), mat);
         mesh.position.set(cx, y - .025, cz);
-        lightObj = new THREE.PointLight(new THREE.Color(hex), 0, 6, 1.4);
-        lightObj.position.set(cx, y - .15, cz);
+        /* 环形 + 中心分布：5 个 PointLight，总强度 = intensity * 4 */
+        const per = intensity * 4 / 5;
+        const yLight = y - .15;
+        addPoint(cx, yLight, cz, per, 5.5);
+        for (let i = 0; i < 4; i++){
+          const a = i * Math.PI / 2 + rot;
+          addPoint(cx + Math.cos(a) * r * .55, yLight, cz + Math.sin(a) * r * .55, per, 5.5);
+        }
         break;
       }
       case 'ceilsquare': {
         mesh = this._mesh(new THREE.BoxGeometry(w, .05, d), mat);
         mesh.position.set(cx, y - .025, cz);
         mesh.rotation.y = rot;
-        lightObj = new THREE.PointLight(new THREE.Color(hex), 0, 6, 1.4);
-        lightObj.position.set(cx, y - .15, cz);
+        /* 2×2 网格分布：4 个 PointLight，总强度 = intensity * 4 */
+        const per = intensity * 4 / 4;
+        const hw = w * .25, hd = d * .25;
+        const cs = Math.cos(rot), sn = Math.sin(rot);
+        for (const sx of [-1, 1]) for (const sz of [-1, 1]){
+          const lx =  sx * hw, lz = sz * hd;
+          addPoint(cx + cs * lx - sn * lz, y - .15, cz + sn * lx + cs * lz, per, 5.5);
+        }
         break;
       }
       case 'lightstrip': {
         mesh = this._mesh(new THREE.BoxGeometry(w, .025, d), mat);
         mesh.position.set(cx, y - .013, cz);
         mesh.rotation.y = rot;
-        lightObj = new THREE.PointLight(new THREE.Color(hex), 0, 5, 1.5);
-        lightObj.position.set(cx, y - .1, cz);
-        baseIntensity = intensity * 2.5;
+        /* 沿长边 N 个 PointLight（3~6），总强度 = intensity * 2.5 */
+        const isHoriz = w >= d;
+        const L = isHoriz ? w : d;
+        const n = Math.max(3, Math.min(6, Math.round(L / .4)));
+        const per = intensity * 2.5 / n;
+        const cs = Math.cos(rot), sn = Math.sin(rot);
+        for (let i = 0; i < n; i++){
+          const t = (i / (n - 1) - .5) * L;   // -L/2 ~ L/2
+          const lx = isHoriz ? t : 0, lz = isHoriz ? 0 : t;
+          addPoint(cx + cs * lx - sn * lz, y - .1, cz + sn * lx + cs * lz, per, 4.5);
+        }
         break;
       }
       case 'downlight': {
         const r = Math.min(w, d) / 2;
         mesh = this._mesh(new THREE.CylinderGeometry(r, r, .06, 16), mat);
         mesh.position.set(cx, y - .03, cz);
-        lightObj = new THREE.PointLight(new THREE.Color(hex), 0, 3, 1.5);
-        lightObj.position.set(cx, y - .05, cz);
-        baseIntensity = intensity * 2;
+        addPoint(cx, y - .05, cz, intensity * 2, 3);
         break;
       }
       case 'spotlight': {
@@ -1666,28 +1719,56 @@ export class Scene3D {
         mesh.position.set(cx, y - .04, cz);
         const sp = new THREE.SpotLight(new THREE.Color(hex), 0, 4.5, Math.PI / 8, .4, 1.2);
         sp.position.set(cx, y - .05, cz);
-        target = new THREE.Object3D();
-        target.position.set(cx, 0, cz);
-        this.scene.add(target);
-        sp.target = target;
-        lightObj = sp;
-        baseIntensity = intensity * 3;
+        sp.userData.fid = f.id;
+        sp.castShadow = false;
+        const tg = new THREE.Object3D();
+        tg.position.set(cx, 0, cz);
+        this.scene.add(tg);
+        sp.target = tg;
+        lights.push({ light: sp, base: intensity * 3 });
+        targets.push(tg);
         break;
       }
       default: return;
     }
 
+    /* 灯体（可见模型）→ lampG（由"灯具"开关控制显隐）
+       光源（PointLight / SpotLight）→ lightG（永远 visible，仅由夜景开关控制强度） */
     if (mesh){
       mesh.userData.fid = f.id;
       mesh.castShadow = false;
       mesh.receiveShadow = false;
-      this.furnG.add(mesh);
+      this.lampG.add(mesh);
     }
-    if (lightObj){
-      lightObj.userData.fid = f.id;
-      this.lamps.push({ light: lightObj, baseIntensity, target });
-      this.lampG.add(lightObj);
-    }
+    lights.forEach(l => this.lightG.add(l.light));
+
+    /* 光照只与夜景开关相关 */
+    const on = !!this.opt.night;
+    lights.forEach(l => { l.light.intensity = on ? l.base : 0; });
+
+    this.lamps.push({ lights, targets });
+  }
+
+  /* ---------- 房间名标签（CSS2D） ---------- */
+  buildLabels(){
+    if (!this.labelG) return;
+    /* 清掉旧标签（含 DOM 节点） */
+    this.labelG.children.slice().forEach(o => {
+      if (o.element && o.element.parentNode) o.element.parentNode.removeChild(o.element);
+      this.labelG.remove(o);
+    });
+
+    (this.app.store.state.plan.rooms || []).filter(r => r.at).forEach(r => {
+      const el = document.createElement('div');
+      el.className = 'rlabel3d';
+      const name = r.name || '';
+      el.textContent = name;
+      const obj = new CSS2DObject(el);
+      obj.position.set(this.wx(r.at[0]), H + .15, this.wz(r.at[1]));
+      this.labelG.add(obj);
+    });
+    this.labelG.visible = !!this.opt.labels;
+    this.labelG.children.forEach(o => { o.visible = !!this.opt.labels; });
   }
 
   sync(force){
@@ -1695,6 +1776,7 @@ export class Scene3D {
     if (!this.active && !force) return;
     this.buildArch();
     this.buildFurn();
+    this.buildLabels();
   }
 
   _applyGrow(){
@@ -1750,9 +1832,11 @@ export class Scene3D {
     this.scene.background = new THREE.Color(this.opt.night ? 0x1c2130 : 0xf7f4ee);
     this.ground.material.color.set(this.opt.night ? 0x2a2e38 : 0xf2eee7);
 
-    /* 顶灯：夜景且家具可见时开，其余关 */
-    (this.lamps || []).forEach(l => {
-      l.light.intensity = (this.opt.night && this.opt.furn) ? l.baseIntensity : 0;
+    /* 顶灯：仅由夜景开关控制；灯具模型可见性不影响光照 */
+    (this.lamps || []).forEach(entry => {
+      entry.lights.forEach(l => {
+        l.light.intensity = this.opt.night ? l.base : 0;
+      });
     });
 
     const h = Math.floor(hour);
@@ -1851,6 +1935,13 @@ export class Scene3D {
     this.stage.classList.remove('animating');
     this.grow = this.furnGrow = 1;
     this._applyGrow();
+    /* 清掉标签 DOM，避免 2D 界面残留 */
+    if (this.labelG){
+      this.labelG.children.slice().forEach(o => {
+        if (o.element && o.element.parentNode) o.element.parentNode.removeChild(o.element);
+      });
+    }
+    if (this.labelRenderer) this.labelRenderer.render(this.scene, this.camera);
   }
 
   _startLoop(){
@@ -1886,6 +1977,7 @@ export class Scene3D {
         });
       }
       this.renderer.render(this.scene, this.camera);
+      if (this.labelRenderer) this.labelRenderer.render(this.scene, this.camera);
     };
     loop();
   }
@@ -1947,9 +2039,17 @@ export class Scene3D {
     this.opt[key] = !this.opt[key];
     btn?.classList.toggle('on', this.opt[key]);
     if (key === 'furn'){
-      this.furnG.visible = this.opt.furn;
-      this.lampG.visible = this.opt.furn;
-      this._applyLight();
+      // 家具开关只管家具 mesh；不影响灯具与光照
+      this.furnG.visible = !!this.opt.furn;
+    }
+    if (key === 'lamps'){
+      // 灯具开关只隐藏灯具模型（lampG）；光源在 lightG 里，不受影响
+      this.lampG.visible = !!this.opt.lamps;
+    }
+    if (key === 'labels'){
+      // 房间名标签显隐
+      this.labelG.visible = !!this.opt.labels;
+      this.labelG.children.forEach(o => { o.visible = !!this.opt.labels; });
     }
     if (key === 'night') this._applyLight();
   }
@@ -1985,7 +2085,7 @@ export class Scene3D {
                         'Left-drag orbits · scroll zooms · click a door leaf to open/close');
     }
   }
-  relang(){ this._syncHint(); }
+  relang(){ this._syncHint(); if (this.inited) this.buildLabels(); }
   shot(){
     const a = document.createElement('a');
     a.download = tr('户型装修方案', 'floor-plan-design') + '-3D.png';

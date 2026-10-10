@@ -65,6 +65,7 @@ export class Toolbar {
         <button class="btn chip on" data-layer="dims">${tr('尺寸','Dims')}</button>
         <button class="btn chip on" data-layer="labels">${tr('房间','Rooms')}</button>
         <button class="btn chip on" data-layer="furn">${tr('家具','Furniture')}</button>
+        <button class="btn chip on" data-layer="lamps">${tr('灯具','Lighting')}</button>
         <button class="btn chip" data-layer="grid">${tr('网格','Grid')}</button>
         <button class="btn chip" data-layer="bearing">${tr('承重墙','Bearing walls')}</button>
         <button class="btn chip on" data-layer="wallSnap">${tr('贴墙吸附','Wall snap')}</button>
@@ -75,6 +76,7 @@ export class Toolbar {
       </div>
       <div class="grp only3d" id="toggles3d">
         <button class="btn chip on" data-t="furn">${tr('家具','Furniture')}</button>
+        <button class="btn chip on" data-t="lamps">${tr('灯具','Lighting')}</button>
         <button class="btn chip on" data-t="labels">${tr('房间名','Labels')}</button>
         <button class="btn chip" data-t="night">${tr('夜景','Night')}</button>
       </div>
@@ -281,15 +283,16 @@ export class Toolbar {
   }
 
   async _loadDefaultPlan(){
-    if (!confirm(tr('加载内置默认户型将覆盖当前户型（可撤销），是否继续？', 'Load the built-in default plan? (undoable)'))) return;
-    const { defaultPlanState } = await import('../data/defaultLayout.js');
+    if (!confirm(tr('加载内置默认户型（含家具与灯具）将覆盖当前方案（可撤销），是否继续？',
+                    'Load the built-in default plan with furniture and lights? (undoable)'))) return;
+    const { defaultState } = await import('../data/defaultLayout.js');
     this.app.select(null);
     this.app.store.mutate('load default plan', () => {
-      const s = defaultPlanState();
+      const s = defaultState();
       Object.assign(this.app.store.state, s);
     });
     this.app.view2d.fit();
-    toast(tr('已加载内置默认户型', 'Default plan loaded'));
+    toast(tr('已加载内置默认户型（含家具与灯具）', 'Default plan loaded (furniture + lights)'));
   }
 
     async _savePlan(){

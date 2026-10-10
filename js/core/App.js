@@ -121,7 +121,7 @@ export class App {
       tool: 'select',
       sel: null,
       mA: null, mCur: null,
-      layers: { dims:true, autoDims:false, labels:true, furn:true, grid:false, bearing:false, wallSnap:true },
+      layers: { dims:true, autoDims:false, labels:true, furn:true, lamps:true, grid:false, bearing:false, wallSnap:true },
     };
     this._radialActive = null;
   }
