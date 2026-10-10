@@ -1063,6 +1063,11 @@ export class Scene3D {
       color: 0xcfe6ef, roughness: .05, transparent: true, opacity: .28,
       depthWrite: false, side: THREE.DoubleSide,
     });
+    /* 只投阴影、不显示：用来在剖切模式下补"不可见全高墙"，或补凸窗顶板，
+       保证采光表现与全墙模式一致，但视角仍然能穿透看到室内。 */
+    this.shadowMat = new THREE.MeshBasicMaterial({
+      colorWrite: false, depthWrite: false, side: THREE.DoubleSide,
+    });
 
     this.archFloor = new THREE.Group();
     this.archUp    = new THREE.Group();
@@ -1243,7 +1248,12 @@ export class Scene3D {
     this.archUp.add(o);
   }
 
-  _buildWallWithOpenings(wall, openings, top){
+  /**
+   * 按门窗洞把墙拆成若干盒体。mat 可选：
+   *   - 传 undefined → 使用默认墙材质（可见）
+   *   - 传 this.shadowMat → 只投阴影、不可见（用于剖切模式下补全高墙）
+   */
+  _buildWallWithOpenings(wall, openings, top, mat){
     const dx = wall.x1 - wall.x0, dy = wall.y1 - wall.y0;
     const wLen = Math.hypot(dx, dy);
     if (wLen < 1) return;
@@ -1261,7 +1271,7 @@ export class Scene3D {
       const head = isDem ? top : (isDoor ? Math.min(2.05, top) : Math.min(2.4, top));
       holes.push({ tMin: Math.max(0, a), tMax: Math.min(wLen, b), sill, head });
     });
-    if (holes.length === 0){ this._wallBox(wall, 0, top); return; }
+    if (holes.length === 0){ this._wallBox(wall, 0, top, mat); return; }
     const breaks = new Set([0, wLen]);
     holes.forEach(h => { breaks.add(h.tMin); breaks.add(h.tMax); });
     const sorted = [...breaks].sort((a, b) => a - b);
@@ -1274,10 +1284,10 @@ export class Scene3D {
       const cx0 = wall.x0 + ux * a, cy0 = wall.y0 + uy * a;
       const cx1 = wall.x0 + ux * b, cy1 = wall.y0 + uy * b;
       const segWall = { x0: cx0, y0: cy0, x1: cx1, y1: cy1, t: wall.t, kind: wall.kind };
-      if (!hit) this._wallBox(segWall, 0, top);
+      if (!hit) this._wallBox(segWall, 0, top, mat);
       else {
-        if (hit.sill > 0.01) this._wallBox(segWall, 0, Math.min(hit.sill, top));
-        if (hit.head < top - 0.01) this._wallBox(segWall, hit.head, top);
+        if (hit.sill > 0.01) this._wallBox(segWall, 0, Math.min(hit.sill, top), mat);
+        if (hit.head < top - 0.01) this._wallBox(segWall, hit.head, top, mat);
       }
     }
   }
@@ -1373,6 +1383,55 @@ export class Scene3D {
     return s;
   }
 
+  /**
+   * 多边形向外扩张 d 毫米。
+   *
+   * 实现对两个方向都做一遍，取面积更大的结果作为"外扩" —— 这样就不依赖
+   * 多边形绕序假设。户型坐标里 y 轴向下，用有向面积判断绕序容易搞反，
+   * 一旦方向算反，"外扩"就变成"内缩"，天花板会沿墙一圈往里收，反而漏光。
+   *
+   * 用途：生成房间天花板前，把房间多边形向外扩一小段，让相邻房间顶板重叠，
+   *      覆盖"两个房间之间没有绘制过门石/墙体中线"导致的小缝隙，防止阳光从缝隙漏入。
+   */
+  _expandPolygon(poly, d){
+    if (!poly || poly.length < 3 || d <= 0) return poly;
+    const a = this._offsetPoly(poly, d, 1);
+    const b = this._offsetPoly(poly, d, -1);
+    return this._polyArea(a) >= this._polyArea(b) ? a : b;
+  }
+
+  /** 角平分线法 offset：sign=+1/-1 分别沿两个相反的法向外移 */
+  _offsetPoly(poly, d, sign){
+    const n = poly.length;
+    const out = [];
+    for (let i = 0; i < n; i++){
+      const p0 = poly[(i - 1 + n) % n], p1 = poly[i], p2 = poly[(i + 1) % n];
+      const e1x = p1[0] - p0[0], e1y = p1[1] - p0[1];
+      const e2x = p2[0] - p1[0], e2y = p2[1] - p1[1];
+      const l1 = Math.hypot(e1x, e1y) || 1;
+      const l2 = Math.hypot(e2x, e2y) || 1;
+      const n1x = sign * (-e1y) / l1, n1y = sign * ( e1x) / l1;
+      const n2x = sign * (-e2y) / l2, n2y = sign * ( e2x) / l2;
+      let bx = n1x + n2x, by = n1y + n2y;
+      const bl = Math.hypot(bx, by);
+      if (bl < 1e-6){ out.push([p1[0], p1[1]]); continue; }
+      bx /= bl; by /= bl;
+      /* 沿角平分线外移 d，需除以 cos(半角)，保证相邻两边都正好平移 d */
+      const cosHalf = n1x * bx + n1y * by;
+      const k = cosHalf > 0.01 ? 1 / cosHalf : 1;
+      out.push([p1[0] + bx * d * k, p1[1] + by * d * k]);
+    }
+    return out;
+  }
+
+  /** 多边形面积（有向面积绝对值） */
+  _polyArea(poly){
+    return Math.abs(poly.reduce((a, p, i) => {
+      const q = poly[(i + 1) % poly.length];
+      return a + p[0] * q[1] - q[0] * p[1];
+    }, 0)) / 2;
+  }
+
   /* ---------- 建筑 ---------- */
   buildArch(){
     this._clear(this.archFloor);
@@ -1398,10 +1457,19 @@ export class Scene3D {
       fl.userData.room = r.id;
       if (bay){ fl.castShadow = true; this.archUp.add(fl); } else this.archFloor.add(fl);
 
-      /* 房顶 shadowOnly：遮挡阳光 → 室内靠窗口直射光 + 间接光；
-         但 colorWrite=false，所以视角依旧能"穿透"看到室内。 */
-      if (top >= H - .01 && r.counted !== false){
-        const cg = new THREE.ShapeGeometry(this._shapeOf(r.poly, true));
+      /* 房顶 shadowOnly：遮挡阳光 → 室内只能靠窗口直射光 + 间接光。
+         要求：
+           ① 不受 opt.cut 影响 —— 剖切墙模式下也要生成，否则阳光会越过矮墙照进来；
+           ② 所有房间都要生成 —— 凸窗（counted === false）也有顶板，
+              否则凸窗开口处会成为漏光通道；
+           ③ 每个房间的多边形向外扩张 EXPAND 毫米后再生成 —— 覆盖房间之间
+              未绘制过门石/墙体中线导致的缝隙，避免阳光从缝隙漏入；
+              相邻房间扩张后必然重叠，重叠部分只投一次阴影，无副作用。
+         ceilMat 的 colorWrite=false / depthWrite=false，视角依旧能穿透看到室内。 */
+      {
+        const EXPAND = 220;   // 大于 1/2 常见墙厚（240/2=120）；对 120/240/360 墙均能覆盖
+        const ceilPoly = this._expandPolygon(r.poly, EXPAND);
+        const cg = new THREE.ShapeGeometry(this._shapeOf(ceilPoly, true));
         cg.rotateX(Math.PI / 2);
         const ceil = new THREE.Mesh(cg, this.ceilMat);
         ceil.position.y = H;
@@ -1443,6 +1511,13 @@ export class Scene3D {
           openings.push({ kind: 'demolition', x0: dm.x0, y0: dm.y0, x1: dm.x1, y1: dm.y1 });
         }
       });
+
+      /* 剖切模式：可见墙只到 opt.cut，但采光要和全墙一样 → 先补一段
+         0 ~ H 的"不可见全高墙"（shadowMat：不写颜色、不写深度，只投阴影）。 */
+      if (top < H - .01){
+        this._buildWallWithOpenings(w, openings, H, this.shadowMat);
+      }
+      /* 可见墙体（0 到 opt.cut） */
       this._buildWallWithOpenings(w, openings, top);
     });
 
