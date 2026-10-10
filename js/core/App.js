@@ -120,7 +120,7 @@ export class App {
       tool: 'select',
       sel: null,
       mA: null, mCur: null,
-      layers: { dims:true, labels:true, furn:true, grid:false, bearing:false, wallSnap:true },
+      layers: { dims:true, autoDims:false, labels:true, furn:true, grid:false, bearing:false, wallSnap:true },
     };
   }
 
@@ -223,6 +223,8 @@ export class App {
       try { this.view2d?.renderAll(); } catch (e){ console.error('[App] renderAll 失败:', e); }
       try { this.propPanel?.render(); } catch (e){ console.error('[App] propPanel 失败:', e); }
       try { this.toolbar?.sync(); } catch (e){ console.error('[App] toolbar.sync 失败:', e); }
+      // 3D 场景：如果已初始化，立刻重建
+      try { this.view3d?.sync(); } catch (e){ console.warn('[App] view3d.sync 失败:', e); }
     });
     bus.on('lang:changed', () => {
       applyStaticLang();
@@ -263,6 +265,46 @@ export class App {
         }
       });
     }
+
+    /* ---- 全局快捷键：Ctrl/Cmd+Z 撤销，Ctrl/Cmd+Y 或 Ctrl/Cmd+Shift+Z 重做 ---- */
+    window.addEventListener('keydown', e => {
+      // 在输入框里不拦截（允许浏览器原生的输入撤销）
+      const t = e.target;
+      if (t && t.matches && t.matches('input,select,textarea,[contenteditable="true"]')) return;
+
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+
+      const k = e.key.toLowerCase();
+      if (k === 'z'){
+        e.preventDefault();
+        if (e.shiftKey) this._redo();
+        else this._undo();
+      } else if (k === 'y'){
+        e.preventDefault();
+        this._redo();
+      }
+    });
+  }
+
+  /* ---- 撤销 / 重做：统一入口，通知所有视图刷新 ---- */
+  _undo(){
+    const ok = this.store.undo();
+    if (!ok){ toast(tr('没有可撤销的操作', 'Nothing to undo')); return; }
+    this._refreshAllViews();
+  }
+  _redo(){
+    const ok = this.store.redo();
+    if (!ok){ toast(tr('没有可重做的操作', 'Nothing to redo')); return; }
+    this._refreshAllViews();
+  }
+
+  /** 强制刷新 2D + 3D + 属性面板 + 工具栏（幂等，重复调用无副作用） */
+  _refreshAllViews(){
+    try { this.view2d?.renderAll(); } catch (e){ console.warn('[App] view2d.renderAll 失败:', e); }
+    try { this.propPanel?.render(); } catch (e){ console.warn('[App] propPanel.render 失败:', e); }
+    try { this.toolbar?.sync(); } catch (e){ console.warn('[App] toolbar.sync 失败:', e); }
+    try { this.view3d?.sync(); } catch (e){ console.warn('[App] view3d.sync 失败:', e); }
   }
 
   async setViewMode(m){

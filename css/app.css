@@ -242,3 +242,16 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
   .lib-grid{grid-template-columns:1fr 1fr 1fr}
   .brand span,footer .only2d{display:none!important}
 }
+
+/* ---------- 阶段切换按钮：两段等宽，pill 精确对齐 ---------- */
+#stageSeg{gap:0}                            /* 覆盖 .grp 的 gap，让 pill 位移计算简单 */
+#stageSeg .btn{width:100px;text-align:center;padding:5px 0}
+#stageSeg .pill{width:100px;transform:translateX(0)}
+.app[data-stage="edit"]   #stageSeg .pill{transform:translateX(0)}
+.app[data-stage="layout"] #stageSeg .pill{transform:translateX(100px)}
+
+@media (pointer:coarse){
+  #stageSeg .btn{width:120px;font-size:13px}
+  #stageSeg .pill{width:120px}
+  .app[data-stage="layout"] #stageSeg .pill{transform:translateX(120px)}
+}

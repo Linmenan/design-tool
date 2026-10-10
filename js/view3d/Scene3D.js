@@ -313,18 +313,30 @@ export class Scene3D {
     (plan.doors || []).forEach(d => {
       const dh = Math.min(2.05, top);
       const L = this.M(Math.hypot(d.x1 - d.x0, d.y1 - d.y0));
-      const hingeAtX0 = d.hinge !== 'right';
-      const hx = hingeAtX0 ? d.x0 : d.x1;
-      const hy = hingeAtX0 ? d.y0 : d.y1;
       const dirX = d.x1 - d.x0, dirY = d.y1 - d.y0;
       const Lw = Math.hypot(dirX, dirY) || 1;
       const ux = dirX / Lw, uy = dirY / Lw;
+
+      // 铰点由 hinge 决定
+      const hingeAtX0 = d.hinge !== 'right';
+      const hx = hingeAtX0 ? d.x0 : d.x1;
+      const hy = hingeAtX0 ? d.y0 : d.y1;
+
+      // 关闭方向：从铰点指向另一端
       const cSign = hingeAtX0 ? 1 : -1;
-      // 关闭时门板朝 (cSign*ux, cSign*uy) 方向；three.js 的 Y 轴旋转要取反
-      const baseAng = Math.atan2(-uy * cSign, ux * cSign);
-      // 打开角度：从关闭方向旋转 ±90°，方向由 swing 决定
+      const cDirX = ux * cSign, cDirY = uy * cSign;
+      const baseAng = Math.atan2(-cDirY, cDirX);     // 2D → three.js Y 旋转
+
+      // 开启方向：由墙的法向量 + swing 决定，与铰点无关
+      const wallNx = -uy, wallNy = ux;
       const swingSign = d.swing === 'out' ? -1 : 1;
-      const openAng = baseAng + swingSign * Math.PI / 2;
+      const oDirX = wallNx * swingSign, oDirY = wallNy * swingSign;
+      const openAngRaw = Math.atan2(-oDirY, oDirX);
+
+      // 归一化到 (-π, π]，避免插值时绕远路
+      let delta = openAngRaw - baseAng;
+      delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+      const openAng = baseAng + delta;
 
       const pivot = new THREE.Group();
       pivot.position.set(this.wx(hx), 0, this.wz(hy));
@@ -570,7 +582,8 @@ export class Scene3D {
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ptr, this.camera);
 
-    const targets = [this.archUp, this.archFloor, this.furnG];
+    // 3D 场景本身只用于浏览，不做硬装编辑；拾取只保留家具（供未来 3D 拖动预留）
+    const targets = [this.furnG];
     const hits = ray.intersectObjects(targets, true);
     for (const h of hits){
       // 跳过玻璃（透明，不挡视线）

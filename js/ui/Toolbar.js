@@ -134,6 +134,7 @@ export class Toolbar {
       </div>
       <div class="grp" id="layers">
         <button class="btn chip on" data-layer="dims">${tr('尺寸','Dims')}</button>
+        <button class="btn chip" data-layer="autoDims" title="${tr('按房间自动生成尺寸链','Auto room dimension chains')}">${tr('房间尺寸','Room dims')}</button>
         <button class="btn chip on" data-layer="labels">${tr('房间','Rooms')}</button>
         <button class="btn chip" data-layer="grid">${tr('网格','Grid')}</button>
         <button class="btn chip" data-layer="bearing">${tr('承重墙','Bearing')}</button>
@@ -171,8 +172,8 @@ export class Toolbar {
     $('#fit')     && ($('#fit').onclick     = () => app.view2d.fit());
     $('#s60')     && ($('#s60').onclick     = () => app.viewport.setRatio(60));
     $('#s100')    && ($('#s100').onclick    = () => app.viewport.setRatio(100));
-    $('#undo')    && ($('#undo').onclick    = () => app.store.undo() || toast(tr('没有可撤销的操作','Nothing to undo')));
-    $('#redo')    && ($('#redo').onclick    = () => app.store.redo());
+    $('#undo')    && ($('#undo').onclick    = () => app._undo());
+    $('#redo')    && ($('#redo').onclick    = () => app._redo());
     $('#clearAll')&& ($('#clearAll').onclick= () => this._clearLayout());
 
     $('#tgLib')   && ($('#tgLib').onclick   = () => app.libPanel.toggle());
@@ -250,11 +251,10 @@ export class Toolbar {
     $('#tgLib')   && $('#tgLib').classList.toggle('on', app.libPanel?.visible());
     $('#tgPanel') && $('#tgPanel').classList.toggle('on', app.propPanel?.visible());
 
-    // 阶段 pill 位置
+    // 阶段 pill 位置由 CSS 根据 [data-stage] 自动控制，这里只需同步按钮高亮
     const seg = $('#stageSeg');
     if (seg){
       const isEdit = app.stage.current === 'edit';
-      seg.querySelector('.pill').style.transform = isEdit ? 'translateX(0)' : 'translateX(96px)';
       seg.querySelectorAll('.btn').forEach(b => b.classList.toggle('on', (b.dataset.stage === 'edit') === isEdit));
     }
   }

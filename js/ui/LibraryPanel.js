@@ -161,6 +161,7 @@ export class LibraryPanel {
         <button class="mat tool" data-tool="select"><i style="background:#e9e3d8"></i><span>${tr('选择','Select')}<small>V</small></span></button>
         <button class="mat tool" data-tool="draw-wall"><i style="background:#a7a195"></i><span>${tr('画墙','Draw wall')}<small>W · ${tr('拖动绘制','drag')}</small></span></button>
         <button class="mat tool" data-tool="draw-room"><i style="background:#2f5d62"></i><span>${tr('画房间','Draw room')}<small>${tr('拖动框选','drag rect')}</small></span></button>
+        <button class="mat tool" data-tool="auto-room"><i style="background:#2f5d62"></i><span>${tr('智能房间','Smart room')}<small>${tr('点击自动识别','click to detect')}</small></span></button>
         <button class="mat tool" data-tool="add-door"><i style="background:#b5653a"></i><span>${tr('开门','Door')}<small>${tr('在墙上点一下','click on wall')}</small></span></button>
         <button class="mat tool" data-tool="add-window"><i style="background:#4f7394"></i><span>${tr('开窗','Window')}<small>${tr('在墙上点一下','click on wall')}</small></span></button>
         <button class="mat tool" data-tool="measure"><i style="background:#2f5d62"></i><span>${tr('测量','Measure')}<small>M</small></span></button>

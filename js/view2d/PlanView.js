@@ -218,19 +218,19 @@ export class PlanView {
       // ① 门套白色底板（覆盖墙）
       s += `<polygon points="${pstr}" fill="#fff" stroke="${strokeCol}" stroke-width="${entry?1.8:1.2}" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
 
-      // ② 铰点 & 关闭方向
+      // ② 铰点 & 关闭方向 & 开启方向（三者解耦）
       const len = linearLength(door);
-      const [dx, dy] = linearDir(door);           // 从 (x0,y0) → (x1,y1)
-      // hinge 决定铰点在 x0y0 还是 x1y1
+      const [dx, dy] = linearDir(door);            // 沿墙方向：x0y0 → x1y1
+      // 开启方向：由「墙的法向量」+ swing 决定，与铰点无关
+      const wallN = [-dy, dx];                     // 墙的法向量（逆时针 90°）
+      const swingSign = door.swing === 'out' ? -1 : 1;
+      const oDir = [wallN[0] * swingSign, wallN[1] * swingSign];
+      // 铰点位置：由 hinge 决定在哪一端
       const hingeAtX0 = door.hinge !== 'right';
       const hx = hingeAtX0 ? door.x0 : door.x1;
       const hy = hingeAtX0 ? door.y0 : door.y1;
-      // 关闭方向 c：从铰点到另一端
+      // 关闭方向：从铰点指向另一端
       const cDir = hingeAtX0 ? [dx, dy] : [-dx, -dy];
-      // 开启方向 o：cDir 旋转 ±90°，由 swing 决定
-      const nrm = [-cDir[1], cDir[0]];             // 逆时针 90°
-      const sign = door.swing === 'out' ? -1 : 1;
-      const oDir = [nrm[0] * sign, nrm[1] * sign];
 
       // ③ 门扇（40mm 厚）
       const leafT = 42;
@@ -303,14 +303,166 @@ export class PlanView {
       return s;
     };
     const g = $('#gDims');
+
+    // 固定尺寸链（仅默认户型）
     const isDefault = this.app.store.state.meta.name === '三室两厅两卫';
-    g.innerHTML = isDefault
+    const fixed = isDefault
       ? chain(true,-750,0,[1580,240,2760,240,1540,240,3670]) + chain(true,-1250,0,[10270]) +
         chain(true,11350,0,[2180,240,2160,240,5450,240,1340]) + chain(true,11850,0,[11850]) +
         chain(false,-800,0,[3370,1580,240,2770,240,2360]) + chain(false,-1300,0,[10560]) +
         chain(false,12750,0,[3370,240,2760,240,3950]) + chain(false,13250,0,[10560])
       : '';
-    g.setAttribute('display', this.app.ui.layers.dims ? 'inline' : 'none');
+
+    // 自动房间尺寸链
+    const auto = this.app.ui.layers.autoDims ? this._buildAutoDims() : '';
+
+    g.innerHTML = fixed + auto;
+    // 只要「固定尺寸」或「房间尺寸」任一开启，这个 SVG 组就显示
+    const visible = this.app.ui.layers.dims || this.app.ui.layers.autoDims;
+    g.setAttribute('display', visible ? 'inline' : 'none');
+  }
+
+  /* ============================================================
+   *  房间自动尺寸链（方案 B）
+   *
+   *  对每个房间：
+   *    ① 找最长边作为「主方向」d，法向 n = perp(d)
+   *    ② 把房间所有顶点投影到 d / n，得到沿两个方向的坐标集合
+   *    ③ 沿主方向 d，在 nMin 侧偏移 OFFSET 生成一条尺寸链
+   *    ④ 沿法方向 n，在 dMin 侧偏移 OFFSET 生成一条尺寸链
+   *
+   *  支持斜房间：以最长边为主方向
+   *  支持凹形房间：所有顶点都参与投影（角点自然被包含）
+   *  相邻房间会各标一次（分别属于两个房间），视觉上分区清晰
+   * ============================================================ */
+  _buildAutoDims(){
+    const rooms = this.app.store.state.plan.rooms || [];
+    const k = 1 / vpSafe(this.vp.s);
+    const FS = 12 * k;              // 字号（屏幕像素换算到用户单位）
+    const OFFSET = 420;             // 尺寸线距房间边界的偏移 mm
+    const LABEL_INSET = 90;         // 数字距尺寸线的内偏移 mm
+    const TICK = 100;               // 端点刻度短横长度 mm
+    const MIN_SEG = 40;             // 小于此长度的段不标注
+
+    const out = [];
+
+    for (const r of rooms){
+      if (!r.poly || r.poly.length < 3) continue;
+      // 跳过飘窗这种辅助房间
+      if (r.counted === false) continue;
+
+      const poly = r.poly;
+      const n = poly.length;
+
+      // ① 找最长边
+      let best = null, bestL = 0;
+      for (let i = 0; i < n; i++){
+        const a = poly[i], b = poly[(i + 1) % n];
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const L = Math.hypot(dx, dy);
+        if (L > bestL){ bestL = L; best = { a, b, dx, dy, L }; }
+      }
+      if (!best || bestL < 500) continue;
+
+      // ② 主方向 d 与法向 n
+      const dx = best.dx / bestL, dy = best.dy / bestL;
+      const nx = -dy, ny = dx;
+      const ox = best.a[0], oy = best.a[1];
+
+      // ③ 投影所有顶点
+      const dVals = [], nVals = [];
+      for (const p of poly){
+        const px = p[0] - ox, py = p[1] - oy;
+        dVals.push(px * dx + py * dy);
+        nVals.push(px * nx + py * ny);
+      }
+      const dMin = Math.min(...dVals), dMax = Math.max(...dVals);
+      const nMin = Math.min(...nVals), nMax = Math.max(...nVals);
+
+      // ④ 生成沿 d 方向的尺寸链（放在 nMin 侧）
+      const dNodes = this._uniqueSorted(dVals, 50);
+      // 只有分段 > 1 才画
+      if (dNodes.length >= 2){
+        out.push(this._chainSVG(
+          [ox, oy], [dx, dy], [nx, ny],
+          dNodes, nMin - OFFSET, 'd',
+          { k, FS, LABEL_INSET, TICK, MIN_SEG, isFirst:true }
+        ));
+      }
+
+      // ⑤ 生成沿 n 方向的尺寸链（放在 dMin 侧）
+      const nNodes = this._uniqueSorted(nVals, 50);
+      if (nNodes.length >= 2){
+        out.push(this._chainSVG(
+          [ox, oy], [nx, ny], [dx, dy],
+          nNodes, dMin - OFFSET, 'n',
+          { k, FS, LABEL_INSET, TICK, MIN_SEG, isFirst:true }
+        ));
+      }
+    }
+
+    return out.join('');
+  }
+
+  /** 数组排序 + 去重（相邻差 < minGap 的合并取中值） */
+  _uniqueSorted(arr, minGap){
+    const s = [...arr].sort((a, b) => a - b);
+    const out = [s[0]];
+    for (let i = 1; i < s.length; i++){
+      if (s[i] - out[out.length - 1] >= minGap) out.push(s[i]);
+      else out[out.length - 1] = (out[out.length - 1] + s[i]) / 2;
+    }
+    return out;
+  }
+
+  /**
+   * 生成一条尺寸链的 SVG。
+   * @param origin   局部坐标系原点 [x, y]（mm）
+   * @param dir      沿尺寸方向单位向量 [dx, dy]
+   * @param normal   垂直方向单位向量 [nx, ny]（尺寸线朝这一侧的 -offset 放置）
+   * @param params   沿 dir 方向的所有节点坐标（已排序去重）
+   * @param offset   尺寸线相对 normal 方向的偏移量
+   * @param mode     'd' 或 'n'（仅用于 debug / 微调）
+   * @param opts     { k, FS, LABEL_INSET, TICK, MIN_SEG }
+   */
+  _chainSVG(origin, dir, normal, params, offset, mode, opts){
+    const { k, FS, LABEL_INSET, TICK, MIN_SEG } = opts;
+    const [ox, oy] = origin;
+    const [dx, dy] = dir;
+    const [nx, ny] = normal;
+    const LS = `stroke="#7d7160" stroke-width="1" vector-effect="non-scaling-stroke"`;
+    const TXT_STYLE = `text-anchor="middle" fill="#7d7160" font-weight="600"`;
+    const HALO = `stroke="#fbf9f4" stroke-width="${3.5*k}" paint-order="stroke" stroke-linejoin="round"`;
+
+    const px = (t, o) => ox + t * dx + o * nx;
+    const py = (t, o) => oy + t * dy + o * ny;
+
+    const parts = [];
+    const t0 = params[0], t1 = params[params.length - 1];
+
+    // 主尺寸线
+    parts.push(`<line x1="${px(t0, offset)}" y1="${py(t0, offset)}" x2="${px(t1, offset)}" y2="${py(t1, offset)}" ${LS}/>`);
+
+    // 每条节点的延长线（从房间边界垂直到尺寸线）
+    params.forEach(t => {
+      parts.push(`<line x1="${px(t, offset - 160)}" y1="${py(t, offset - 160)}" x2="${px(t, offset + 160)}" y2="${py(t, offset + 160)}" ${LS}/>`);
+    });
+
+    // 每段数值 —— 中国建筑制图规范：文字头朝上/朝右，角度归一化到 [-90°, 90°]
+    let ang = Math.atan2(dy, dx) * 180 / Math.PI;
+    if (ang > 90)  ang -= 180;
+    else if (ang < -90) ang += 180;
+    for (let i = 0; i < params.length - 1; i++){
+      const seg = params[i + 1] - params[i];
+      if (seg < MIN_SEG) continue;
+      const mid = (params[i] + params[i + 1]) / 2;
+      const x = px(mid, offset - LABEL_INSET);
+      const y = py(mid, offset - LABEL_INSET);
+      const value = Math.round(seg);
+      parts.push(`<text x="${x}" y="${y}" font-size="${FS}" ${TXT_STYLE} ${HALO} transform="rotate(${ang} ${x} ${y})">${value}</text>`);
+    }
+
+    return parts.join('');
   }
 
   renderMeasure(){
@@ -353,7 +505,24 @@ export class PlanView {
       if (w) s += this._selLinear(w, '#4f7394', R, HIT, 'window');
     } else if (sel?.kind === 'room'){
       const r = (this.app.store.state.plan.rooms || []).find(x => x.id === sel.id);
-      if (r) s += `<polygon points="${r.poly.map(p => p.join(',')).join(' ')}" fill="rgba(181,101,58,.08)" stroke="#b5653a" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+      if (r){
+        // 房间多边形高亮
+        s += `<polygon points="${r.poly.map(p => p.join(',')).join(' ')}" fill="rgba(181,101,58,.08)" stroke="#b5653a" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+
+        // 顶点（实心圆，可拖动）+ 边中点（空心圆，点击插入新顶点）
+        const n = r.poly.length;
+        const HIT = 16 * k, R = 6 * k;
+        for (let i = 0; i < n; i++){
+          const [vx, vy] = r.poly[i];
+          s += `<circle data-handle="room-vertex" data-idx="${i}" cx="${vx}" cy="${vy}" r="${HIT}" fill="transparent"/>`;
+          s += `<circle cx="${vx}" cy="${vy}" r="${R}" fill="#b5653a" stroke="#fff" stroke-width="1.5" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+
+          const [vx2, vy2] = r.poly[(i + 1) % n];
+          const mx = (vx + vx2) / 2, my = (vy + vy2) / 2;
+          s += `<circle data-handle="room-edge-mid" data-idx="${i}" cx="${mx}" cy="${my}" r="${HIT * 0.8}" fill="transparent"/>`;
+          s += `<circle cx="${mx}" cy="${my}" r="${R * 0.7}" fill="#fff" stroke="#b5653a" stroke-width="1.2" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+        }
+      }
     } else if (sel?.kind === 'furn' && !this.isEdit){
       const f = this.app.store.getFurniture(sel.id);
       if (f){
@@ -428,6 +597,7 @@ export class PlanView {
         'add-door':   tr(`门 ${this.editor.doorWidth}`, `Door`),
         'add-window': tr(`窗 ${this.editor.winWidth}×${this.editor.winHeight}`, `Window`),
         'draw-room':  tr(`画房间 · ${this.editor.roomMat}`, `Room`),
+        'auto-room':  tr('智能房间 · 点击空白处自动识别', `Smart room`),
         'measure':    tr('测量 · 点两点', 'Measure'),
         'demolish':   tr('拆墙', 'Demolish'),
         'select':     tr('选择 · 拖动墙身联动门窗', 'Select'),
@@ -437,6 +607,12 @@ export class PlanView {
   }
 
   setTool(t){
+    // 装修阶段不允许使用编辑类工具
+    const EDIT_ONLY = ['draw-wall','draw-room','add-door','add-window'];
+    if (!this.isEdit && EDIT_ONLY.includes(t)){
+      t = 'select';
+      toast(tr('装修布置阶段不能编辑墙体，请先切到「户型编辑」', 'Switch to Plan Edit to modify walls'));
+    }
     this.app.ui.tool = t;
     this.svg.setAttribute('class', 'tool-' + t);
     this.syncModeHint();
@@ -451,7 +627,8 @@ export class PlanView {
       measure: tr('点击两点测量距离 · Shift 锁定水平/垂直', 'Click two points'),
       demolish: tr('点击灰色非承重墙标记拆除', 'Click a grey wall to remove'),
       'draw-wall': tr('拖动绘制墙体 · Shift 锁定正交 · 斜墙沿中心线生成', 'Drag to draw; Shift locks'),
-      'draw-room': tr('拖动绘制矩形房间', 'Drag a rect room'),
+      'draw-room': tr('拖动绘制矩形房间', 'Drag to draw a rect room'),
+      'auto-room': tr('点击房间内部空白处，自动沿墙识别多边形房间 · 识别后可直接拖动顶点微调 · 右键顶点删除', 'Click inside an empty room area to detect the polygon automatically · Drag vertices to adjust · Right-click a vertex to delete'),
       'add-door': tr('在墙上点一下放置门', 'Click a wall'),
       'add-window': tr('在墙上点一下放置窗', 'Click a wall'),
     };
@@ -626,7 +803,24 @@ export class PlanView {
       if (this.app.ui.tool === 'select' && e.target.closest('[data-fid]')) this.rotateSel(90);
     });
     svg.addEventListener('contextmenu', e => {
-      if (this.app.ui.tool === 'measure'){ e.preventDefault(); this.app.ui.mA = null; this.renderMeasure(); }
+      if (this.app.ui.tool === 'measure'){ e.preventDefault(); this.app.ui.mA = null; this.renderMeasure(); return; }
+
+      // 右键房间顶点 → 删除该顶点
+      const h = e.target.closest('[data-handle="room-vertex"]');
+      if (h && this.app.ui.sel?.kind === 'room'){
+        e.preventDefault();
+        const r = (this.app.store.state.plan.rooms || []).find(x => x.id === this.app.ui.sel.id);
+        if (!r) return;
+        if (r.poly.length <= 3){
+          toast(tr('房间至少需要 3 个顶点', 'A room needs at least 3 vertices'));
+          return;
+        }
+        const idx = +h.dataset.idx, roomId = r.id;
+        this.app.store.mutate('del vertex', s => {
+          const t2 = s.plan.rooms.find(x => x.id === roomId);
+          if (t2 && t2.poly.length > 3) t2.poly.splice(idx, 1);
+        });
+      }
     });
   }
 
@@ -671,6 +865,63 @@ export class PlanView {
       return;
     }
 
+    /* ---- 智能房间：点击空白区域，自动沿墙生成房间 ---- */
+    if (tool === 'auto-room'){
+      // 如果点击点已经在某个现有房间内，忽略
+      const inRoom = (this.app.store.state.plan.rooms || []).some(r => this._pointInPoly(p, r.poly));
+      if (inRoom){
+        toast(tr('该位置已在某个房间内', 'Already inside a room'));
+        return;
+      }
+      const poly = this._smartRoomAt(p);
+      if (!poly || poly.length < 3){
+        toast(tr('未能识别房间边界，请点击房间内部的空白区域', 'Could not detect a room here — click inside an empty room area'));
+        return;
+      }
+      const id = 'room_' + uid();
+      const xs = poly.map(q => q[0]), ys = poly.map(q => q[1]);
+      const at = [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2];
+      this.app.store.mutate('auto room', s => s.plan.rooms.push({
+        id, name:'新房间', poly, mat: this.editor.roomMat, at,
+      }));
+      this.app.select({ kind:'room', id });
+      this.setTool('select');
+      toast(tr(`已识别房间（${poly.length} 个顶点）`, `Room detected (${poly.length} vertices)`));
+      return;
+    }
+
+    /* ---- 房间顶点 / 边中点 ---- */
+    const hh = t.closest('[data-handle]');
+    if (hh?.dataset.handle === 'room-vertex' && this.app.ui.sel?.kind === 'room'){
+      this.drag = {
+        kind:'room-vertex', idx:+hh.dataset.idx,
+        sx:e.clientX, sy:e.clientY,
+        before:this.app.store.snapshot(), moved:false,
+      };
+      try { this.svg.setPointerCapture(e.pointerId); } catch {}
+      return;
+    }
+    if (hh?.dataset.handle === 'room-edge-mid' && this.app.ui.sel?.kind === 'room'){
+      const r = (this.app.store.state.plan.rooms || []).find(x => x.id === this.app.ui.sel.id);
+      if (r){
+        const idx = +hh.dataset.idx;
+        const a = r.poly[idx], b = r.poly[(idx + 1) % r.poly.length];
+        const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+        const roomId = r.id;
+        this.app.store.mutate('add vertex', s => {
+          const t2 = s.plan.rooms.find(x => x.id === roomId);
+          if (t2) t2.poly.splice(idx + 1, 0, [mx, my]);
+        });
+        this.drag = {
+          kind:'room-vertex', idx:idx + 1,
+          sx:e.clientX, sy:e.clientY,
+          before:this.app.store.snapshot(), moved:false,
+        };
+        try { this.svg.setPointerCapture(e.pointerId); } catch {}
+      }
+      return;
+    }
+
     /* ---- 端点控制点 ---- */
     const handle = t.closest('[data-handle]');
     if (handle?.dataset.handle === 'linear-end' && (this.app.ui.sel?.kind === 'wall' || this.app.ui.sel?.kind === 'door' || this.app.ui.sel?.kind === 'window')){
@@ -707,28 +958,29 @@ export class PlanView {
     }
 
     if (tool === 'select'){
-      // 门 / 窗优先
-      const hitD = this.hitDoor(p);
-      if (hitD){
-        this.app.select({ kind:'door', id: hitD.id });
-        this.drag = { kind:'drag-door', id:hitD.id, sx:e.clientX, sy:e.clientY, before:this.app.store.snapshot(), moved:false };
-        try { this.svg.setPointerCapture(e.pointerId); } catch {}
-        return;
-      }
-      const hitW = this.hitWindow(p);
-      if (hitW){
-        this.app.select({ kind:'window', id: hitW.id });
-        this.drag = { kind:'drag-window', id:hitW.id, sx:e.clientX, sy:e.clientY, before:this.app.store.snapshot(), moved:false };
-        try { this.svg.setPointerCapture(e.pointerId); } catch {}
-        return;
-      }
-      // 墙
-      const hitWall = this.hitWall(p);
-      if (hitWall){
-        this.app.select({ kind:'wall', id: hitWall.id });
-        this.drag = { kind:'drag-wall', id:hitWall.id, sx:e.clientX, sy:e.clientY, ox:p.x, oy:p.y, before:this.app.store.snapshot(), moved:false };
-        try { this.svg.setPointerCapture(e.pointerId); } catch {}
-        return;
+      // 装修布置阶段：锁定硬装（墙/门/窗），只允许操作家具和房间
+      if (this.isEdit){
+        const hitD = this.hitDoor(p);
+        if (hitD){
+          this.app.select({ kind:'door', id: hitD.id });
+          this.drag = { kind:'drag-door', id:hitD.id, sx:e.clientX, sy:e.clientY, before:this.app.store.snapshot(), moved:false };
+          try { this.svg.setPointerCapture(e.pointerId); } catch {}
+          return;
+        }
+        const hitW = this.hitWindow(p);
+        if (hitW){
+          this.app.select({ kind:'window', id: hitW.id });
+          this.drag = { kind:'drag-window', id:hitW.id, sx:e.clientX, sy:e.clientY, before:this.app.store.snapshot(), moved:false };
+          try { this.svg.setPointerCapture(e.pointerId); } catch {}
+          return;
+        }
+        const hitWall = this.hitWall(p);
+        if (hitWall){
+          this.app.select({ kind:'wall', id: hitWall.id });
+          this.drag = { kind:'drag-wall', id:hitWall.id, sx:e.clientX, sy:e.clientY, ox:p.x, oy:p.y, before:this.app.store.snapshot(), moved:false };
+          try { this.svg.setPointerCapture(e.pointerId); } catch {}
+          return;
+        }
       }
       const room = t.closest('[data-room]');
       if (room){ this.app.select({ kind:'room', id:room.dataset.room }); return; }
@@ -885,6 +1137,21 @@ export class PlanView {
       return;
     }
 
+    /* ---- 房间顶点拖拽 ---- */
+    if (this.drag.kind === 'room-vertex'){
+      if (!this.drag.moved && !far) return;
+      this.drag.moved = true;
+      const r = (this.app.store.state.plan.rooms || []).find(x => x.id === this.app.ui.sel.id);
+      if (!r) return;
+      const q = this.snapPoint(p, e.shiftKey, null);
+      r.poly[this.drag.idx] = [q.x, q.y];
+      // 更新房间名位置到包围盒中心
+      const xs = r.poly.map(x => x[0]), ys = r.poly.map(x => x[1]);
+      r.at = [(Math.min(...xs) + Math.max(...xs)) / 2, (Math.min(...ys) + Math.max(...ys)) / 2];
+      this.renderRooms(); this.renderLabels(); this.renderSel();
+      return;
+    }
+
     /* ---- 墙身拖拽：整体平移 + 联动门窗（无限长直线判断，比 distToSeg 宽容） ---- */
     if (this.drag.kind === 'drag-wall'){
       if (!this.drag.moved && !far) return;
@@ -1037,7 +1304,7 @@ export class PlanView {
       return;
     }
 
-    if (d.kind === 'linear-end' || d.kind === 'drag-wall' || d.kind === 'drag-door' || d.kind === 'drag-window'){
+    if (d.kind === 'linear-end' || d.kind === 'drag-wall' || d.kind === 'drag-door' || d.kind === 'drag-window' || d.kind === 'room-vertex'){
       if (d.moved && d.before){
         this.app.store.commitWith(d.before, 'edit');
         this.renderAll();
@@ -1219,6 +1486,118 @@ export class PlanView {
     });
     toast(tr(`已把 (${x}, ${y}) 设为原点`, `Origin set`));
     this.fit();
+  }
+
+  /* ============================================================
+   *  智能房间识别：点击空白处，自动沿墙生成多边形房间
+   *
+   *  算法（射线扫描法）：
+   *    ① 从点击点 P 出发，均匀发 N 条射线
+   *    ② 每条射线找最近的墙交点
+   *    ③ 所有交点按角度排序 → 得到多边形顶点
+   *    ④ 去重 + 共线简化
+   * ============================================================ */
+  _smartRoomAt(p){
+    const walls = this.app.store.state.plan.walls || [];
+    if (!walls.length) return null;
+
+    // 若点击点离任何墙太近，直接拒绝
+    let minDist = Infinity;
+    for (const w of walls){
+      const d = distToSeg(p.x, p.y, w.x0, w.y0, w.x1, w.y1) - (w.t || 240) / 2;
+      if (d < minDist) minDist = d;
+    }
+    if (minDist < 30) return null;
+
+    const N = 128;
+    const hits = [];
+    for (let i = 0; i < N; i++){
+      const ang = (i + 0.5) / N * Math.PI * 2;
+      const dir = [Math.cos(ang), Math.sin(ang)];
+      const hit = this._rayHitWalls(p, dir, walls);
+      if (hit) hits.push({ ang, x:hit.x, y:hit.y });
+    }
+    if (hits.length < 3) return null;
+
+    hits.sort((a, b) => a.ang - b.ang);
+    const pts = hits.map(h => [h.x, h.y]);
+    const simplified = this._simplifyPolygon(pts);
+    if (simplified.length < 3) return null;
+
+    // 反向检查：点击点必须在新多边形的内部（用射线法验证）
+    if (!this._pointInPoly(p, simplified)) return null;
+
+    return simplified;
+  }
+
+  /** 从 p 沿 dir 方向发射线，返回最近的墙交点（或 null） */
+  _rayHitWalls(p, dir, walls){
+    let bestT = Infinity, best = null;
+    for (const w of walls){
+      const t = this._raySegIntersect(p, dir, [w.x0, w.y0], [w.x1, w.y1]);
+      if (t != null && t > 1 && t < bestT){
+        bestT = t;
+        best = { x: p.x + dir[0] * t, y: p.y + dir[1] * t };
+      }
+    }
+    return best;
+  }
+
+  /** 射线 origin + t·dir 与线段 a→b 求交，返回沿射线的距离 t；无交点返回 null */
+  _raySegIntersect(o, d, a, b){
+    const ex = b[0] - a[0], ey = b[1] - a[1];
+    const det = d[0] * ey - d[1] * ex;
+    if (Math.abs(det) < 1e-9) return null;       // 平行
+    const dx = a[0] - o.x, dy = a[1] - o.y;
+    const t = (dx * ey - dy * ex) / det;
+    const u = (dx * d[1] - dy * d[0]) / det;
+    if (t > 0.5 && u >= 0 && u <= 1) return t;
+    return null;
+  }
+
+  /** 多边形顶点简化：去重 + 删除近似共线的点 */
+  _simplifyPolygon(pts){
+    // 去重（相邻 < 100mm 合并）
+    const dedup = [];
+    for (const p of pts){
+      const prev = dedup[dedup.length - 1];
+      if (!prev || Math.hypot(p[0] - prev[0], p[1] - prev[1]) > 100) dedup.push([p[0], p[1]]);
+    }
+    if (dedup.length > 1){
+      const f = dedup[0], l = dedup[dedup.length - 1];
+      if (Math.hypot(f[0] - l[0], f[1] - l[1]) < 100) dedup.pop();
+    }
+
+    // 删除近似共线的点
+    const n = dedup.length;
+    if (n < 3) return dedup;
+    const out = [];
+    for (let i = 0; i < n; i++){
+      const a = dedup[(i - 1 + n) % n], b = dedup[i], c = dedup[(i + 1) % n];
+      const abx = b[0] - a[0], aby = b[1] - a[1];
+      const bcx = c[0] - b[0], bcy = c[1] - b[1];
+      const cross = abx * bcy - aby * bcx;
+      const lenAB = Math.hypot(abx, aby);
+      const lenBC = Math.hypot(bcx, bcy);
+      if (lenAB < 1e-6 || lenBC < 1e-6) continue;
+      // 夹角接近 0° 或 180° 时叉积 / 长度积 很小
+      if (Math.abs(cross) / (lenAB * lenBC) < 0.03) continue;
+      out.push(b);
+    }
+    return out;
+  }
+
+  /** 点是否在多边形内部（射线法） */
+  _pointInPoly(p, poly){
+    let inside = false;
+    const n = poly.length;
+    for (let i = 0, j = n - 1; i < n; j = i++){
+      const xi = poly[i][0], yi = poly[i][1];
+      const xj = poly[j][0], yj = poly[j][1];
+      const hit = ((yi > p.y) !== (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi);
+      if (hit) inside = !inside;
+    }
+    return inside;
   }
 }
 
