@@ -1,5 +1,6 @@
 import { $, $$, esc, toast } from '../core/Utils.js';
-import { tr, LANGS, getLang } from '../core/I18n.js';
+import { tr, LANGS, getLang, nm } from '../core/I18n.js';
+import { CEILING_TYPES } from '../data/furnitureLib.js';
 
 /**
  * Toolbar — 顶部工具栏（按阶段重建）。
@@ -95,6 +96,17 @@ export class Toolbar {
       </div>
       <div class="spacer"></div>
       ${this._langHTML()}
+      <details class="menu" id="lightMenu">
+        <summary class="btn">💡 ${tr('灯光','Lights')}</summary>
+        <div class="light-panel">
+          <div class="lp-header">
+            <span class="lp-count" id="lpCount"></span>
+            <button class="btn chip" id="lpOnAll">${tr('全开','All on')}</button>
+            <button class="btn chip" id="lpOffAll">${tr('全关','All off')}</button>
+          </div>
+          <div class="lp-list" id="lpList"></div>
+        </div>
+      </details>
       <button class="btn" id="fullscreen" style="border:1px solid var(--line);background:#fff">⛶ ${tr('全屏','Fullscreen')}</button>
       <details class="menu"><summary class="btn">${tr('文件','File')} ▾</summary>
         <div class="menu-pop">
@@ -223,6 +235,11 @@ export class Toolbar {
     $('#vIso') && ($('#vIso').onclick = () => app.view3d?.goIso());
     $('#vTop') && ($('#vTop').onclick = () => app.view3d?.goTop());
 
+    // 灯光中控面板：全开 / 全关
+    const lpOn = $('#lpOnAll'), lpOff = $('#lpOffAll');
+    if (lpOn)  lpOn.onclick  = e => { e.preventDefault(); e.stopPropagation(); this._allLamps(true); };
+    if (lpOff) lpOff.onclick = e => { e.preventDefault(); e.stopPropagation(); this._allLamps(false); };
+
     // 全屏
     $('#fullscreen') && ($('#fullscreen').onclick = () => this._toggleFullscreen());
 
@@ -258,6 +275,57 @@ export class Toolbar {
       const isEdit = app.stage.current === 'edit';
       seg.querySelectorAll('.btn').forEach(b => b.classList.toggle('on', (b.dataset.stage === 'edit') === isEdit));
     }
+
+    /* 灯光中控面板：数据变化时同步刷新（开关状态、灯的数量） */
+    this._syncLightPanel();
+  }
+
+  /** 刷新灯光面板中的灯列表 */
+  _syncLightPanel(){
+    const list = $('#lpList'), cnt = $('#lpCount');
+    if (!list) return;                    // 当前不在 layout 阶段
+    const furn = this.app.store.state.layout.furniture || [];
+    const lamps = furn.filter(f => CEILING_TYPES.has(f.type));
+    const onN = lamps.filter(f => (f.lamp?.on) !== false).length;
+    if (cnt) cnt.textContent = lamps.length ? `${onN}/${lamps.length} ${tr('亮','on')}` : '';
+
+    if (!lamps.length){
+      list.innerHTML = `<div class="lp-empty">${tr('暂无灯具，从左侧「灯具」分类拖入','No lights. Drag one from the Lights category.')}</div>`;
+      return;
+    }
+    list.innerHTML = lamps.map(f => {
+      const on = (f.lamp?.on) !== false;
+      const name = nm(f.name) || nm(f.type);
+      return `<label class="lp-row" data-id="${f.id}">
+        <input type="checkbox" ${on ? 'checked' : ''}>
+        <span class="lp-name" title="${esc(name)}">${esc(name)}</span>
+        <small class="lp-type">${esc(nm(f.type))}</small>
+      </label>`;
+    }).join('');
+
+    /* 逐个绑定：只改这一盏灯的 on 开关，不动其他家具 → 3D 只更新灯具 */
+    list.querySelectorAll('.lp-row').forEach(row => {
+      const id = row.dataset.id;
+      const cb = row.querySelector('input');
+      cb.onchange = () => {
+        this.app.store.mutate('toggle lamp', s => {
+          const g = s.layout.furniture.find(x => x.id === id);
+          if (g){ g.lamp = g.lamp || {}; g.lamp.on = cb.checked; }
+        });
+      };
+    });
+  }
+
+  /** 全开 / 全关：一次性修改所有灯的 on 开关 */
+  _allLamps(on){
+    const furn = this.app.store.state.layout.furniture || [];
+    const has = furn.some(f => CEILING_TYPES.has(f.type));
+    if (!has) return toast(tr('当前方案里还没有灯具','No lights in the current plan'));
+    this.app.store.mutate(on ? 'lamps all on' : 'lamps all off', s => {
+      (s.layout.furniture || []).forEach(f => {
+        if (CEILING_TYPES.has(f.type)){ f.lamp = f.lamp || {}; f.lamp.on = on; }
+      });
+    });
   }
 
   /* ---------- 动作 ---------- */
