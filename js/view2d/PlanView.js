@@ -4,7 +4,7 @@ import {
   linearPoly, linearLength, linearDir, linearNormal, pointOnLine,
 } from '../data/planData.js';
 import { furnSVG, NOLABEL } from './FurnSVG.js';
-import { typeColor } from '../data/furnitureLib.js';
+import { typeColor, CEILING_TYPES } from '../data/furnitureLib.js';
 
 const COARSE = matchMedia('(pointer:coarse)').matches;
 const TAP = COARSE ? 9 : 4;
@@ -780,6 +780,8 @@ export class PlanView {
   snapMove(f, cx, cy){
     let nx = Math.round(cx/10)*10, ny = Math.round(cy/10)*10;
     if (!this.app.ui.layers.wallSnap) return [nx, ny];
+    // 天花板灯具不吸附墙体
+    if (CEILING_TYPES.has(f.type)) return [nx, ny];
     const { hw, hh } = aabb(f), tol = 10/this.vp.s;
     let bx = tol, by = tol;
     for (const r of this.snapRects()){
@@ -1672,7 +1674,12 @@ export class PlanView {
   addItem(it, x, y){
     const [type, name, w, d, color] = it;
     const f = { id:uid(), type, name, cx:Math.round(x/10)*10, cy:Math.round(y/10)*10, w, d, rot:0, color:color || typeColor(type) };
-    this._pushOut(f);
+    if (CEILING_TYPES.has(type)){
+      // 灯具默认属性
+      f.lamp = { intensity: 1, color: '#ffd9a8' };
+    } else {
+      this._pushOut(f);
+    }
     this.app.select({ kind:'furn', id:f.id });
     this.app.store.mutate('add ' + name, s => {
       if (type === 'rug') s.layout.furniture.unshift(f);

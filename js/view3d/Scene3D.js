@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { $, toast } from '../core/Utils.js';
 import { tr } from '../core/I18n.js';
+import { CEILING_TYPES } from '../data/furnitureLib.js';
 
 const OX = 6000, OY = 5300, H = 2.8, FOV = 45;
 const WALK_FOV = 72, WALK_FOV_MIN = 50, WALK_FOV_MAX = 95;
@@ -1436,9 +1437,7 @@ export class Scene3D {
   buildArch(){
     this._clear(this.archFloor);
     this._clear(this.archUp);
-    this._clear(this.lampG);
     this._clear(this.ceilingG);
-    this.lamps = [];
     const { plan, layout } = this.app.store.state;
     const top = this.opt.cut;
 
@@ -1478,30 +1477,6 @@ export class Scene3D {
         this.ceilingG.add(ceil);
       }
 
-      /* 顶灯：房间几何中心，天花板下方。
-         剖切墙模式（top < H）下只保留 PointLight 的光照，不显示灯盘，
-         否则会看到灯盘悬在半空中。 */
-      const lampCfg = r.lamp || {};
-      if (r.at && lampCfg.on !== false){
-        const lx = this.wx(r.at[0]), lz = this.wz(r.at[1]);
-        const color = lampCfg.color || '#ffd9a8';
-        const showDisc = top >= H - .01;
-        if (showDisc){
-          const disc = new THREE.Mesh(
-            new THREE.CylinderGeometry(.18, .18, .02, 24),
-            this._mat('#fbfbf9', { emissive: new THREE.Color(color), emissiveIntensity: .25, roughness: .5 }));
-          disc.position.set(lx, H - .015, lz);
-          disc.userData.lamp = { roomId: r.id };
-          this.lampG.add(disc);
-        }
-        const pl = new THREE.PointLight(new THREE.Color(color), 0, 7, 1.6);
-        pl.position.set(lx, H - .25, lz);
-        const baseIntensity = Math.max(.2, Math.min(2, lampCfg.intensity ?? 1)) * 4;
-        pl.userData.baseIntensity = baseIntensity;
-        pl.userData.lamp = { roomId: r.id };
-        this.lamps.push({ light: pl, baseIntensity });
-        this.lampG.add(pl);
-      }
     });
 
     /* 墙体（按门窗洞分段生成） */
@@ -1590,15 +1565,21 @@ export class Scene3D {
     });
 
     this._applyGrow();
-    /* 重建后同步一次顶灯开关：夜景下新建的 PointLight 强度默认为 0，
-       必须按 opt.night 设置，否则切剖切墙 / 换层高时会瞬间全灭。 */
-    (this.lamps || []).forEach(l => { l.light.intensity = this.opt.night ? l.baseIntensity : 0; });
   }
 
   /* ---------- 家具 ---------- */
   buildFurn(){
+    /* 清理旧灯（含 SpotLight 目标） */
+    (this.lamps || []).forEach(l => { if (l.target) this.scene.remove(l.target); });
     this._clear(this.furnG);
+    this._clear(this.lampG);
+    this.lamps = [];
+
     (this.app.store.state.layout.furniture || []).forEach(f => {
+      if (CEILING_TYPES.has(f.type)){
+        this._buildCeilingLight(f);
+        return;
+      }
       const g = this._furnMesh(f.type, this.M(f.w), this.M(f.d), f.color || '#dddddd');
       g.position.set(this.wx(f.cx), 0, this.wz(f.cy));
       g.rotation.y = -f.rot * Math.PI / 180;
@@ -1607,7 +1588,106 @@ export class Scene3D {
       this.furnG.add(g);
     });
     this.furnG.visible = this.opt.furn;
+    this.lampG.visible = this.opt.furn;
+
+    /* 应用夜景 / 家具开关到所有新灯 */
+    (this.lamps || []).forEach(l => {
+      l.light.intensity = (this.opt.night && this.opt.furn) ? l.baseIntensity : 0;
+    });
+
     this._applyGrow();
+  }
+
+  /** 灯具颜色：优先自定义 color，其次按 colorTemp 预设 */
+  _lampColor(lamp){
+    if (!lamp) return '#ffd9a8';
+    if (lamp.color) return lamp.color;
+    const t = lamp.colorTemp;
+    if (t === 'cool')    return '#cfe4ff';
+    if (t === 'neutral') return '#fff4dc';
+    return '#ffd9a8';
+  }
+
+  /**
+   * 生成一盏天花板灯：可见灯体 + PointLight / SpotLight。
+   * 位置固定在 H（层高）下方；拖动灯具在 2D 中改变 cx / cy 即可。
+   */
+  _buildCeilingLight(f){
+    const w = this.M(f.w), d = this.M(f.d);
+    const cx = this.wx(f.cx), cz = this.wz(f.cy);
+    const rot = -f.rot * Math.PI / 180;
+    const lamp = f.lamp || {};
+    const hex = this._lampColor(lamp);
+    const intensity = Math.max(.2, Math.min(3, lamp.intensity ?? 1));
+    const y = H - 0.02;
+    const mat = this._mat('#fbfbf9', { emissive: new THREE.Color(hex), emissiveIntensity: .55, roughness: .5 });
+
+    let mesh = null, lightObj = null, target = null;
+    let baseIntensity = intensity * 4;
+
+    switch (f.type){
+      case 'ceilround': {
+        const r = Math.min(w, d) / 2;
+        mesh = this._mesh(new THREE.CylinderGeometry(r, r * .95, .05, 24), mat);
+        mesh.position.set(cx, y - .025, cz);
+        lightObj = new THREE.PointLight(new THREE.Color(hex), 0, 6, 1.4);
+        lightObj.position.set(cx, y - .15, cz);
+        break;
+      }
+      case 'ceilsquare': {
+        mesh = this._mesh(new THREE.BoxGeometry(w, .05, d), mat);
+        mesh.position.set(cx, y - .025, cz);
+        mesh.rotation.y = rot;
+        lightObj = new THREE.PointLight(new THREE.Color(hex), 0, 6, 1.4);
+        lightObj.position.set(cx, y - .15, cz);
+        break;
+      }
+      case 'lightstrip': {
+        mesh = this._mesh(new THREE.BoxGeometry(w, .025, d), mat);
+        mesh.position.set(cx, y - .013, cz);
+        mesh.rotation.y = rot;
+        lightObj = new THREE.PointLight(new THREE.Color(hex), 0, 5, 1.5);
+        lightObj.position.set(cx, y - .1, cz);
+        baseIntensity = intensity * 2.5;
+        break;
+      }
+      case 'downlight': {
+        const r = Math.min(w, d) / 2;
+        mesh = this._mesh(new THREE.CylinderGeometry(r, r, .06, 16), mat);
+        mesh.position.set(cx, y - .03, cz);
+        lightObj = new THREE.PointLight(new THREE.Color(hex), 0, 3, 1.5);
+        lightObj.position.set(cx, y - .05, cz);
+        baseIntensity = intensity * 2;
+        break;
+      }
+      case 'spotlight': {
+        const r = Math.min(w, d) / 2;
+        mesh = this._mesh(new THREE.CylinderGeometry(r, r * .7, .08, 16), mat);
+        mesh.position.set(cx, y - .04, cz);
+        const sp = new THREE.SpotLight(new THREE.Color(hex), 0, 4.5, Math.PI / 8, .4, 1.2);
+        sp.position.set(cx, y - .05, cz);
+        target = new THREE.Object3D();
+        target.position.set(cx, 0, cz);
+        this.scene.add(target);
+        sp.target = target;
+        lightObj = sp;
+        baseIntensity = intensity * 3;
+        break;
+      }
+      default: return;
+    }
+
+    if (mesh){
+      mesh.userData.fid = f.id;
+      mesh.castShadow = false;
+      mesh.receiveShadow = false;
+      this.furnG.add(mesh);
+    }
+    if (lightObj){
+      lightObj.userData.fid = f.id;
+      this.lamps.push({ light: lightObj, baseIntensity, target });
+      this.lampG.add(lightObj);
+    }
   }
 
   sync(force){
@@ -1670,8 +1750,10 @@ export class Scene3D {
     this.scene.background = new THREE.Color(this.opt.night ? 0x1c2130 : 0xf7f4ee);
     this.ground.material.color.set(this.opt.night ? 0x2a2e38 : 0xf2eee7);
 
-    /* 顶灯：夜景开、白天灭 */
-    (this.lamps || []).forEach(l => { l.light.intensity = this.opt.night ? l.baseIntensity : 0; });
+    /* 顶灯：夜景且家具可见时开，其余关 */
+    (this.lamps || []).forEach(l => {
+      l.light.intensity = (this.opt.night && this.opt.furn) ? l.baseIntensity : 0;
+    });
 
     const h = Math.floor(hour);
     const m = Math.round((hour - h) * 60);
@@ -1864,7 +1946,11 @@ export class Scene3D {
   toggle(key, btn){
     this.opt[key] = !this.opt[key];
     btn?.classList.toggle('on', this.opt[key]);
-    if (key === 'furn') this.furnG.visible = this.opt.furn;
+    if (key === 'furn'){
+      this.furnG.visible = this.opt.furn;
+      this.lampG.visible = this.opt.furn;
+      this._applyLight();
+    }
     if (key === 'night') this._applyLight();
   }
   setHour(v){ this.opt.hour = Math.max(0, Math.min(24, +v || 0)); this._applyLight(); }

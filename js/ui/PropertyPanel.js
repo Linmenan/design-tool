@@ -1,6 +1,7 @@
 import { $, $$, esc, fmt, norm, area, perim, bbox, toast } from '../core/Utils.js';
 import { tr, nm } from '../core/I18n.js';
 import { linearLength, linearDir } from '../data/planData.js';
+import { CEILING_TYPES } from '../data/furnitureLib.js';
 import { CityPicker } from './CityPicker.js';
 import { findCity } from '../data/cities.js';
 // 若报 linearLength 未定义，说明 planData.js 不是最新版（需要含 linearLength/linearDir/pointOnLine 的工具函数）
@@ -92,7 +93,9 @@ export class PropertyPanel {
   }
 
   _furnPanel(f){
-    this._html(`<section><h3>${tr('家具属性','Furniture')}</h3>
+    const isLamp = CEILING_TYPES.has(f.type);
+    const lamp = f.lamp || {};
+    this._html(`<section><h3>${isLamp ? tr('灯具属性','Light Properties') : tr('家具属性','Furniture')}</h3>
       <div class="form">
         <label class="full">${tr('名称','Name')}<input id="fName" value="${esc(nm(f.name))}"></label>
         <label>${tr('宽','Width')} (mm)<input type="number" id="fW" value="${Math.round(f.w)}" min="50" step="10"></label>
@@ -102,6 +105,19 @@ export class PropertyPanel {
         <label>${tr('旋转','Rotation')} (°)<input type="number" id="fR" value="${Math.round(f.rot)}" step="15"></label>
         <label>${tr('颜色','Color')}<input type="color" id="fC" value="${f.color}"></label>
       </div>
+      ${isLamp ? `
+      <h3 style="margin-top:12px">${tr('光照','Illumination')}</h3>
+      <div class="form">
+        <label>${tr('亮度','Intensity')}<input type="number" id="lampInt" value="${lamp.intensity ?? 1}" min=".2" max="3" step=".1"></label>
+        <label>${tr('色温预设','Preset')}
+          <div style="display:flex;gap:4px;margin-top:2px">
+            <button class="btn chip lamp-preset ${(lamp.color||'#ffd9a8')==='#ffd9a8'?'on':''}" data-ct="#ffd9a8" title="${tr('暖光 3000K','Warm 3000K')}">${tr('暖','Warm')}</button>
+            <button class="btn chip lamp-preset ${lamp.color==='#fff4dc'?'on':''}" data-ct="#fff4dc" title="${tr('中性 4000K','Neutral 4000K')}">${tr('中','Neutral')}</button>
+            <button class="btn chip lamp-preset ${lamp.color==='#cfe4ff'?'on':''}" data-ct="#cfe4ff" title="${tr('冷光 6000K','Cool 6000K')}">${tr('冷','Cool')}</button>
+          </div></label>
+        <label class="full">${tr('自定义颜色','Custom color')}<input type="color" id="lampColor" value="${lamp.color || '#ffd9a8'}"></label>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:6px">${tr('灯具挂在天花板上，随白天 / 夜晚模式自动开关。','Ceiling lights follow day / night mode.')}</div>` : ''}
       <div class="actions">
         <button class="btn" id="aRot">${tr('旋转 90°','Rotate 90°')}</button>
         <button class="btn" id="aDup">${tr('复制','Duplicate')}</button>
@@ -118,6 +134,17 @@ export class PropertyPanel {
     num('#fY', (g,v) => g.cy = v);
     num('#fR', (g,v) => g.rot = norm(v));
     $('#fC').onchange = e => upd(g => g.color = e.target.value);
+
+    if (isLamp){
+      const updLamp = fn => upd(g => { g.lamp = g.lamp || { intensity: 1, color: '#ffd9a8' }; fn(g.lamp); });
+      $('#lampInt') && ($('#lampInt').onchange = e => {
+        const v = Math.max(.2, Math.min(3, parseFloat(e.target.value) || 1));
+        updLamp(l => { l.intensity = v; });
+      });
+      $('#lampColor') && ($('#lampColor').oninput = e => updLamp(l => { l.color = e.target.value; }));
+      $$('.lamp-preset').forEach(b => b.onclick = () => updLamp(l => { l.color = b.dataset.ct; }));
+    }
+
     $('#aRot').onclick = () => this.app.view2d.rotateSel(90);
     $('#aDup').onclick = () => {
       const n = { ...f, id:'f' + Date.now().toString(36), cx:f.cx+200, cy:f.cy+200 };
@@ -138,7 +165,6 @@ export class PropertyPanel {
     const mats = Object.entries(this.app.store.state.plan.mats).map(([k, m]) =>
       `<button class="mat ${k === r.mat ? 'on' : ''}" data-mat="${k}"><i style="background:${m.sw}"></i><span>${nm(m.name)}<small>¥${m.price}/m²</small></span></button>`).join('');
 
-    const lamp = r.lamp || {};
     this._html(`<section><h3>${tr('房间','Room')}</h3>
       <div class="form"><label class="full">${tr('名称','Name')}<input id="rName" value="${esc(nm(r.name))}"></label></div>
       <div class="stats" style="margin-top:10px">
@@ -147,13 +173,8 @@ export class PropertyPanel {
         <div><small>${tr('开间','Width')}</small><span class="big">${Math.round(x1-x0)}</span> mm</div>
         <div><small>${tr('进深','Depth')}</small><span class="big">${Math.round(y1-y0)}</span> mm</div></div></section>
     <section><h3>${tr('地面材料','Flooring')}</h3><div class="mats">${mats}</div></section>
-    <section><h3>${tr('顶灯','Ceiling lamp')}</h3>
-      <div class="form">
-        <label class="full"><input type="checkbox" id="lampOn" ${lamp.on !== false ? 'checked' : ''} style="width:auto"> ${tr('夜间自动开启','On at night')}</label>
-        <label>${tr('色温','Color')}<input type="color" id="lampColor" value="${lamp.color || '#ffd9a8'}"></label>
-        <label>${tr('亮度','Intensity')}<input type="number" id="lampInt" min=".2" max="2" step=".1" value="${lamp.intensity ?? 1}"></label>
-      </div>
-      <div class="muted" style="font-size:12px;margin-top:6px">${tr('顶灯安装在房间几何中心的天花板下，白天不发光，夜景时作为主光。','Installed at the room center below the ceiling. Off during day, main light at night.')}</div>
+    <section><h3>${tr('顶灯','Lighting')}</h3>
+      <div class="muted" style="font-size:12px">${tr('在左侧「灯具」分类中拖入吸顶灯 / 灯带 / 筒灯等，放到本房间即可自动生成光照。','Drag a ceiling light / strip / downlight from the Lighting category onto this room to add lighting.')}</div>
     </section>
     ${isEdit ? '' : `<section><h3>${tr('房间内家具','Furniture')} <small>${inside.length}</small></h3>
       <table>${inside.map(f => `<tr class="click" data-fid="${f.id}"><td>${esc(nm(f.name))}</td><td class="r muted">${f.w}×${f.d}</td></tr>`).join('') || `<tr><td class="muted">${tr('暂无','None')}</td></tr>`}</table></section>`}
@@ -170,10 +191,6 @@ export class PropertyPanel {
     }));
     $$('#panel tr[data-fid]').forEach(tr => tr.onclick = () => this.app.select({ kind:'furn', id:tr.dataset.fid }));
     $('#back').onclick = () => this.app.select(null);
-    const lon = $('#lampOn'), lcol = $('#lampColor'), lint = $('#lampInt');
-    if (lon)  lon.onchange  = e => store.mutate('lamp on',  s => { const t = s.plan.rooms.find(x => x.id === id); if (t){ t.lamp = t.lamp || {}; t.lamp.on = e.target.checked; } });
-    if (lcol) lcol.oninput  = e => store.mutate('lamp color', s => { const t = s.plan.rooms.find(x => x.id === id); if (t){ t.lamp = t.lamp || {}; t.lamp.color = e.target.value; } });
-    if (lint) lint.onchange = e => store.mutate('lamp int', s => { const t = s.plan.rooms.find(x => x.id === id); if (t){ t.lamp = t.lamp || {}; t.lamp.intensity = Math.max(.2, Math.min(2, +e.target.value || 1)); } });
   }
 
   /* ============ 编辑阶段 ============ */

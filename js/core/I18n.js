@@ -38,6 +38,8 @@ export const NAMES_EN = {
   '55 寸电视':'55" TV', '对开门冰箱':'French-door Fridge', '柜机空调':'Floor AC', '挂机空调':'Wall AC', '洗碗机':'Dishwasher',
   '蒸烤箱高柜':'Oven Tower', '烘干机':'Dryer', '空气净化器':'Air Purifier', '长书桌':'Long Desk', '办公椅':'Office Chair',
   '大书架':'Large Bookshelf', '立式钢琴':'Upright Piano', '跑步机':'Treadmill', '阅读椅':'Reading Chair', '茶桌':'Tea Table', '休闲椅':'Lounge Chair',
+  '圆形吸顶灯':'Round Ceiling Light', '方形吸顶灯':'Square Ceiling Light', '灯带':'Light Strip', '筒灯':'Downlight', '射灯':'Spotlight',
+  '灯具':'Lighting',
 };
 
 /** 名称翻译：英文界面下显示译名，用户自己改过的名字原样显示 */

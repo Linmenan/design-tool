@@ -9,7 +9,10 @@
  * - 也支持从 JSON 文件追加（见 loadExtra）。
  */
 
-export const CATEGORIES = ['卧室', '客厅', '餐厨', '卫浴', '家电', '书房 · 休闲'];
+export const CATEGORIES = ['卧室', '客厅', '餐厨', '卫浴', '家电', '书房 · 休闲', '灯具'];
+
+/** 天花板灯具类型集合 —— PlanView / Scene3D / PropertyPanel 共用 */
+export const CEILING_TYPES = new Set(['ceilround', 'ceilsquare', 'lightstrip', 'downlight', 'spotlight']);
 
 export const ITEMS = [
   /* --- 卧室 --- */
@@ -83,6 +86,13 @@ export const ITEMS = [
   { cat:'书房 · 休闲', type:'piano',       name:'立式钢琴', w:1500, d:600,  color:'#1f1d1b' },
   { cat:'书房 · 休闲', type:'treadmill',   name:'跑步机',   w:800,  d:1800, color:'#3a3a3c' },
   { cat:'书房 · 休闲', type:'armchair',    name:'阅读椅',   w:750,  d:800,  color:'#c9a98a' },
+
+  /* --- 灯具（贴在天花板，3D 中生成 PointLight / SpotLight） --- */
+  { cat:'灯具', type:'ceilround',  name:'圆形吸顶灯', w:600,  d:600,  color:'#fff4dc' },
+  { cat:'灯具', type:'ceilsquare', name:'方形吸顶灯', w:600,  d:600,  color:'#fff4dc' },
+  { cat:'灯具', type:'lightstrip', name:'灯带',       w:2000, d:60,   color:'#fff4dc' },
+  { cat:'灯具', type:'downlight',  name:'筒灯',       w:120,  d:120,  color:'#fff4dc' },
+  { cat:'灯具', type:'spotlight',  name:'射灯',       w:120,  d:120,  color:'#fff4dc' },
 ];
 
 /** 查找类型默认颜色 */

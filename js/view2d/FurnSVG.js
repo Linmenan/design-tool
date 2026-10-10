@@ -108,6 +108,47 @@ export function furnSVG(t, w, d, c){
       return s;
     }
     case 'treadmill': return rc(x,y,w,d,c,'rx="50"') + rc(x+90,y+320,w-180,d-400,'#1c1c1e','rx="25"') + rc(x,y,w,230,shade(c,1.4),'rx="40"');
+
+    /* ---------- 灯具：顶部虚线 = 天花板投影轮廓，中心实心 = 灯具本体 ---------- */
+    case 'ceilround': {
+      const r = m/2;
+      return `<circle cx="0" cy="0" r="${r}" fill="${c}" fill-opacity=".28" stroke="#b5653a" stroke-width="1" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"/>
+        <circle cx="0" cy="0" r="${r*.55}" fill="${c}" fill-opacity=".9" ${ST}/>
+        <circle cx="0" cy="0" r="${r*.22}" fill="#fff8e6" ${ST}/>`;
+    }
+    case 'ceilsquare': {
+      const s = m/2;
+      return `<rect x="${-s}" y="${-s}" width="${2*s}" height="${2*s}" fill="${c}" fill-opacity=".28" stroke="#b5653a" stroke-width="1" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"/>
+        <rect x="${-s*.55}" y="${-s*.55}" width="${s*1.1}" height="${s*1.1}" fill="${c}" fill-opacity=".9" ${ST}/>
+        <rect x="${-s*.22}" y="${-s*.22}" width="${s*.44}" height="${s*.44}" fill="#fff8e6" ${ST}/>`;
+    }
+    case 'lightstrip': {
+      const horiz = w >= d;
+      const L = horiz ? w : d, T = horiz ? d : w;
+      const pad = 6;
+      const s = horiz
+        ? `<rect x="${-w/2-pad}" y="${-T*1.1}" width="${w+pad*2}" height="${T*2.2}" fill="${c}" fill-opacity=".18" stroke="#b5653a" stroke-width="1" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"/>
+           <rect x="${-w/2}" y="${-d/2}" width="${w}" height="${d}" fill="${c}" fill-opacity=".9" ${ST}/>
+           <line x1="${-w/2+20}" y1="0" x2="${w/2-20}" y2="0" stroke="#fff8e6" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`
+        : `<rect x="${-T*1.1}" y="${-d/2-pad}" width="${T*2.2}" height="${d+pad*2}" fill="${c}" fill-opacity=".18" stroke="#b5653a" stroke-width="1" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"/>
+           <rect x="${-w/2}" y="${-d/2}" width="${w}" height="${d}" fill="${c}" fill-opacity=".9" ${ST}/>
+           <line x1="0" y1="${-d/2+20}" x2="0" y2="${d/2-20}" stroke="#fff8e6" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`;
+      return s;
+    }
+    case 'downlight': {
+      const r = Math.max(m/2, 80);
+      return `<circle cx="0" cy="0" r="${r*2}" fill="${c}" fill-opacity=".18" stroke="#b5653a" stroke-width="1" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"/>
+        <circle cx="0" cy="0" r="${r}" fill="${c}" fill-opacity=".9" ${ST}/>
+        <circle cx="0" cy="0" r="${r*.35}" fill="#fff8e6" ${ST}/>`;
+    }
+    case 'spotlight': {
+      const r = Math.max(m/2, 80);
+      return `<circle cx="0" cy="0" r="${r*2}" fill="${c}" fill-opacity=".18" stroke="#b5653a" stroke-width="1" stroke-dasharray="5 3" vector-effect="non-scaling-stroke"/>
+        <circle cx="0" cy="0" r="${r}" fill="${c}" fill-opacity=".9" ${ST}/>
+        <circle cx="0" cy="0" r="${r*.5}" fill="none" stroke="#b5653a" stroke-width="1" vector-effect="non-scaling-stroke"/>
+        <circle cx="0" cy="0" r="${r*.2}" fill="#fff8e6" ${ST}/>`;
+    }
+
     default: return rc(x,y,w,d,c);
   }
 }
