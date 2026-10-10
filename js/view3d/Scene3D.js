@@ -1478,17 +1478,22 @@ export class Scene3D {
         this.ceilingG.add(ceil);
       }
 
-      /* 顶灯：房间几何中心，天花板下方 */
+      /* 顶灯：房间几何中心，天花板下方。
+         剖切墙模式（top < H）下只保留 PointLight 的光照，不显示灯盘，
+         否则会看到灯盘悬在半空中。 */
       const lampCfg = r.lamp || {};
       if (r.at && lampCfg.on !== false){
         const lx = this.wx(r.at[0]), lz = this.wz(r.at[1]);
         const color = lampCfg.color || '#ffd9a8';
-        const disc = new THREE.Mesh(
-          new THREE.CylinderGeometry(.18, .18, .02, 24),
-          this._mat('#fbfbf9', { emissive: new THREE.Color(color), emissiveIntensity: .25, roughness: .5 }));
-        disc.position.set(lx, H - .015, lz);
-        disc.userData.lamp = { roomId: r.id };
-        this.lampG.add(disc);
+        const showDisc = top >= H - .01;
+        if (showDisc){
+          const disc = new THREE.Mesh(
+            new THREE.CylinderGeometry(.18, .18, .02, 24),
+            this._mat('#fbfbf9', { emissive: new THREE.Color(color), emissiveIntensity: .25, roughness: .5 }));
+          disc.position.set(lx, H - .015, lz);
+          disc.userData.lamp = { roomId: r.id };
+          this.lampG.add(disc);
+        }
         const pl = new THREE.PointLight(new THREE.Color(color), 0, 7, 1.6);
         pl.position.set(lx, H - .25, lz);
         const baseIntensity = Math.max(.2, Math.min(2, lampCfg.intensity ?? 1)) * 4;
@@ -1585,6 +1590,9 @@ export class Scene3D {
     });
 
     this._applyGrow();
+    /* 重建后同步一次顶灯开关：夜景下新建的 PointLight 强度默认为 0，
+       必须按 opt.night 设置，否则切剖切墙 / 换层高时会瞬间全灭。 */
+    (this.lamps || []).forEach(l => { l.light.intensity = this.opt.night ? l.baseIntensity : 0; });
   }
 
   /* ---------- 家具 ---------- */
