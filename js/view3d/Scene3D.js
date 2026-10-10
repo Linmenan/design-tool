@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { $, esc, area, clamp01, ease, toast } from '../core/Utils.js';
+import { $, esc, area, clamp01, ease, toast, shade } from '../core/Utils.js';
 import { tr, nm } from '../core/I18n.js';
 
 const OX = 6000, OY = 5300, H = 2.8, FOV = 45;
@@ -387,33 +387,403 @@ export class Scene3D {
     this._applyGrow();
   }
 
-  /* ---------- 家具（简化方块，带基本高度差异） ---------- */
+  /* ---------- 家具（按类型组合几何体） ---------- */
   buildFurn(){
     this._clear(this.furnG);
     (this.app.store.state.layout.furniture || []).forEach(f => {
       const w = this.M(f.w), d = this.M(f.d), c = f.color || '#dddddd';
-      const h = ({
-        bed: .45, sofa: .6, armchair: .65, cornersofa: .65, wardrobe: 1.6,
-        cabinet: 1, shoecab: 1.0, dresser: .75, desk: .72, chair: .85,
-        bookshelf: 1.8, coffeetable: .4, table: .72, roundtable: .75,
-        counter: .88, island: .88, stove: .9, fridge: 1.8,
-        toilet: .4, vanity: .85, shower: .02, bathtub: .55,
-        washer: .85, dryer: .85, plant: 1.2, tvstand: .5, tv: .6,
-        rug: .02, baycushion: .5,
-      }[f.type] ?? .6);
-
-      const m = new THREE.Mesh(
-        new THREE.BoxGeometry(w, h, d),
-        new THREE.MeshStandardMaterial({ color:c, roughness:.75 })
-      );
-      m.position.set(this.wx(f.cx), h / 2, this.wz(f.cy));
-      m.rotation.y = -f.rot * Math.PI / 180;
-      m.castShadow = true; m.receiveShadow = true;
-      m.userData.fid = f.id;
-      this.furnG.add(m);
+      const g = this._furnMesh(f.type, w, d, c);
+      g.position.set(this.wx(f.cx), 0, this.wz(f.cy));
+      g.rotation.y = -f.rot * Math.PI / 180;
+      // 把 fid 挂到组及所有子物体，便于 _pick 往上找
+      g.userData.fid = f.id;
+      g.traverse(o => { o.userData.fid = f.id; });
+      this.furnG.add(g);
     });
     this.furnG.visible = this.opt.furn;
     this._applyGrow();
+  }
+
+  /**
+   * 按家具类型生成组合几何体。
+   * 约定：返回 THREE.Group，原点在俯视中心、底面 y=0，width 沿 X、depth 沿 Z。
+   * @param {string} type  家具 type（与 furnitureLib 一致）
+   * @param {number} w     宽（米）
+   * @param {number} d     深（米）
+   * @param {string} color 主色
+   */
+  _furnMesh(type, w, d, color){
+    const g = new THREE.Group();
+    const mat = (c = color, rough = .75) => new THREE.MeshStandardMaterial({ color: c, roughness: rough });
+    const M  = mat(color, .78);                       // 主色
+    const Md = mat(shade(color, .72), .8);            // 深色 / 阴影面
+    const Ml = mat(shade(color, 1.28), .55);          // 亮色 / 软包
+    const Mk = mat('#2b2a26', .55);                   // 金属 / 深色零件
+    const Mw = mat('#ffffff', .4);                    // 白瓷 / 玻璃面板
+
+    const add = (geo, m, x, y, z) => {
+      const mesh = new THREE.Mesh(geo, m);
+      mesh.position.set(x, y, z);
+      mesh.castShadow = true; mesh.receiveShadow = true;
+      g.add(mesh);
+      return mesh;
+    };
+    const box = (W, H, D, x, y, z, m = M) => add(new THREE.BoxGeometry(W, H, D), m, x, y, z);
+    const cyl = (R, H, x, y, z, m = M, seg = 16) => add(new THREE.CylinderGeometry(R, R, H, seg), m, x, y, z);
+    const sph = (R, x, y, z, m = M) => add(new THREE.SphereGeometry(R, 14, 10), m, x, y, z);
+
+    switch (type){
+      /* ---------- 卧室 ---------- */
+      case 'bed': {
+        const bH = 0.3;
+        box(w, bH, d, 0, bH/2, 0, Md);                               // 床架
+        box(w * 0.94, 0.18, d * 0.88, 0, bH + 0.09, -d * 0.02, Ml);  // 床垫
+        const pW = w > 1.3 ? w * 0.4 : w * 0.72;
+        box(pW, 0.1, 0.32, w > 1.3 ? -w * 0.22 : 0, bH + 0.22, -d * 0.32, Ml);
+        if (w > 1.3) box(pW, 0.1, 0.32, w * 0.22, bH + 0.22, -d * 0.32, Ml);
+        box(w * 0.9, 0.06, d * 0.55, 0, bH + 0.22, d * 0.16, mat(shade(color, 1.12), .85)); // 被子
+        break;
+      }
+      case 'crib': {
+        const h = 0.85, ph = 0.04;
+        [[-w/2, -d/2], [w/2, -d/2], [-w/2, d/2], [w/2, d/2]].forEach(([x, z]) => box(ph, h, ph, x, h/2, z, Md));
+        box(w, 0.04, d, 0, 0.28, 0, Md);
+        box(w * 0.9, 0.06, d * 0.85, 0, 0.33, 0, Ml);
+        for (let i = 1; i < 6; i++){
+          const x = -w/2 + i * w / 6;
+          box(0.02, 0.42, 0.02, x, 0.62, -d/2 + 0.03);
+          box(0.02, 0.42, 0.02, x, 0.62,  d/2 - 0.03);
+        }
+        break;
+      }
+      case 'nightstand': {
+        const h = 0.5;
+        box(w, h, d, 0, h/2, 0, M);
+        box(w * 0.92, 0.015, 0.01, 0, h * 0.55, d/2 + 0.005, Mk);
+        box(w * 0.3, 0.02, 0.02, 0, h * 0.55, d/2 + 0.02, Mk);
+        break;
+      }
+      case 'wardrobe': {
+        const h = 1.9;
+        box(w, h, d, 0, h/2, 0, M);
+        box(0.015, h * 0.94, 0.015, 0, h/2, d/2 + 0.005, Mk);        // 门缝
+        box(0.035, 0.25, 0.03, -0.06, h * 0.5, d/2 + 0.03, Mk);      // 把手
+        box(0.035, 0.25, 0.03,  0.06, h * 0.5, d/2 + 0.03, Mk);
+        break;
+      }
+      case 'dresser': {
+        const h = 0.78;
+        box(w, h, d, 0, h/2, 0, M);
+        box(w * 1.02, 0.03, d * 1.02, 0, h + 0.015, 0, Md);
+        // 镜面
+        box(w * 0.55, 0.7, 0.02, 0, h + 0.38, -d/2 + 0.02, mat('#cad2d8', .25));
+        break;
+      }
+      case 'desk': {
+        const h = 0.72;
+        box(w, 0.04, d, 0, h, 0, M);
+        const px = w/2 - 0.05, pz = d/2 - 0.05;
+        [[-px, -pz], [px, -pz], [-px, pz], [px, pz]].forEach(([x, z]) => box(0.04, h, 0.04, x, h/2, z, Md));
+        break;
+      }
+      case 'chair': {
+        const h = 0.45;
+        box(w, 0.05, d, 0, h, 0, M);
+        box(w, 0.55, 0.04, 0, h + 0.3, -d/2 + 0.03, M);              // 靠背
+        const px = w/2 - 0.04, pz = d/2 - 0.04;
+        [[-px, -pz], [px, -pz], [-px, pz], [px, pz]].forEach(([x, z]) => box(0.03, h, 0.03, x, h/2, z, Md));
+        break;
+      }
+      case 'bookshelf': {
+        const h = 1.8;
+        box(w, h, d, 0, h/2, 0, M);
+        box(w * 1.01, 0.015, 0.012, 0, h * 0.32, d/2 + 0.005, Md);
+        box(w * 1.01, 0.015, 0.012, 0, h * 0.64, d/2 + 0.005, Md);
+        const vn = Math.max(2, Math.round(w / 0.5));
+        for (let i = 1; i < vn; i++) box(0.012, h * 0.9, 0.012, -w/2 + i * w / vn, h/2, d/2 + 0.005, Md);
+        break;
+      }
+      case 'baycushion': {
+        box(w, 0.1, d, 0, 0.05, 0, M);
+        box(w * 0.85, 0.03, d * 0.85, 0, 0.11, 0, Ml);
+        break;
+      }
+
+      /* ---------- 客厅 ---------- */
+      case 'sofa': case 'armchair': case 'cornersofa': {
+        const bH = 0.36;
+        box(w, bH, d, 0, bH/2, 0, Md);
+        box(w, 0.65, d * 0.22, 0, 0.32, -d/2 + d * 0.11, M);          // 靠背
+        box(w * 0.11, 0.5, d, -w/2 + w * 0.055, 0.25, 0, M);
+        box(w * 0.11, 0.5, d,  w/2 - w * 0.055, 0.25, 0, M);
+        const inner = w * 0.78;
+        const n = type === 'armchair' ? 1 : (w > 2.2 ? 3 : 2);
+        const cw = (inner / n) * 0.92;
+        for (let i = 0; i < n; i++){
+          const cx = -inner/2 + i * (inner/n) + (inner/n) / 2;
+          box(cw, 0.15, d * 0.68, cx, bH + 0.075, d * 0.08, Ml);
+        }
+        box(inner, 0.3, 0.1, 0, 0.52, -d/2 + 0.14, Ml);
+        break;
+      }
+      case 'beanbag': {
+        const R = Math.min(w, d) / 2;
+        const s = new THREE.Mesh(new THREE.SphereGeometry(R, 20, 14), M);
+        s.scale.y = 0.62;
+        s.position.y = R * 0.55;
+        s.castShadow = true; s.receiveShadow = true;
+        g.add(s);
+        break;
+      }
+      case 'coffeetable': {
+        const h = 0.4;
+        box(w, 0.055, d, 0, h, 0, M);
+        box(w * 0.85, 0.03, d * 0.7, 0, h * 0.4, 0, Md);             // 下层隔板
+        const px = w/2 - 0.05, pz = d/2 - 0.05;
+        [[-px, -pz], [px, -pz], [-px, pz], [px, pz]].forEach(([x, z]) => box(0.04, h, 0.04, x, h/2, z, Md));
+        break;
+      }
+      case 'sidetable': {
+        const h = 0.55;
+        cyl(w / 2, 0.04, 0, h, 0, M, 20);
+        cyl(0.035, h, 0, h / 2, 0, Md, 12);
+        cyl(w * 0.25, 0.03, 0, 0.015, 0, Md, 20);
+        break;
+      }
+      case 'rug': {
+        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.012, d), M);
+        mesh.position.set(0, 0.006, 0);
+        mesh.receiveShadow = true;
+        g.add(mesh);
+        break;
+      }
+      case 'tvstand': case 'cabinet': case 'shoecab': {
+        const h = type === 'tvstand' ? 0.5 : 0.9;
+        box(w, h, d, 0, h/2, 0, M);
+        box(w * 1.02, 0.03, d * 1.03, 0, h + 0.015, 0, Md);
+        // 抽屉缝
+        box(w * 0.9, 0.012, 0.012, 0, h * 0.5, d/2 + 0.005, Mk);
+        break;
+      }
+      case 'floorlamp': {
+        cyl(0.15, 0.03, 0, 0.015, 0, Md, 20);
+        cyl(0.018, 1.2, 0, 0.62, 0, Md, 10);
+        cyl(0.18, 0.26, 0, 1.32, 0, mat('#fff6dd', .4), 20);
+        break;
+      }
+      case 'plant': {
+        const R = Math.min(w, d) / 2 * 0.4;
+        cyl(R, 0.35, 0, 0.175, 0, mat('#a8794f', .85), 14);
+        sph(R * 1.7, 0, 0.8, 0, mat(shade(color, .9), .9));
+        sph(R * 1.2, R * 0.42, 1.05, -R * 0.22, mat(shade(color, 1.12), .9));
+        sph(R * 1.0, -R * 0.5, 0.95, R * 0.3, mat(shade(color, .8), .9));
+        break;
+      }
+
+      /* ---------- 餐厨 ---------- */
+      case 'table': {
+        const h = 0.74;
+        box(w, 0.05, d, 0, h, 0, M);
+        const px = w/2 - 0.06, pz = d/2 - 0.06;
+        [[-px, -pz], [px, -pz], [-px, pz], [px, pz]].forEach(([x, z]) => box(0.05, h, 0.05, x, h/2, z, Md));
+        break;
+      }
+      case 'roundtable': {
+        const h = 0.74;
+        cyl(w / 2, 0.05, 0, h, 0, M, 28);
+        cyl(0.07, h, 0, h/2, 0, Md, 14);
+        cyl(w * 0.22, 0.04, 0, 0.02, 0, Md, 20);
+        break;
+      }
+      case 'counter': case 'island': {
+        const h = 0.88;
+        box(w, h - 0.04, d, 0, (h - 0.04)/2, 0, M);
+        box(w * 1.02, 0.04, d * 1.05, 0, h - 0.02, 0, mat('#d0c9b8', .55));
+        break;
+      }
+      case 'stove': {
+        const h = 0.9;
+        box(w, h, d, 0, h/2, 0, mat('#2f2f2f', .5));
+        const r = Math.min(w, d) * 0.17;
+        const pts = w / d > 1.4
+          ? [[-w * 0.25, 0], [w * 0.25, 0]]
+          : [[-w * 0.25, -d * 0.25], [w * 0.25, -d * 0.25], [-w * 0.25, d * 0.25], [w * 0.25, d * 0.25]];
+        pts.forEach(([x, z]) => {
+          cyl(r, 0.02, x, h + 0.01, z, mat('#555', .4), 18);
+          cyl(r * 0.5, 0.03, x, h + 0.02, z, mat('#181818', .35), 14);
+        });
+        break;
+      }
+      case 'ksink': {
+        const h = 0.88;
+        box(w, h, d, 0, h/2, 0, mat('#dcdcdc', .5));
+        box(w * 0.42, 0.05, d * 0.66, -w * 0.22, h - 0.02, 0, mat('#a8b0b4', .35));
+        box(w * 0.42, 0.05, d * 0.66,  w * 0.22, h - 0.02, 0, mat('#a8b0b4', .35));
+        cyl(0.015, 0.2, 0, h + 0.1, -d * 0.3, mat('#c8ccce', .3), 10);
+        break;
+      }
+      case 'fridge': {
+        const h = 1.85;
+        box(w, h, d, 0, h/2, 0, mat(color, .45));
+        box(w * 1.01, 0.015, 0.01, 0, h * 0.7, d/2 + 0.005, Mk);
+        box(0.03, 0.5, 0.035, w * 0.32, h * 0.5, d/2 + 0.03, Mk);
+        box(0.03, 0.5, 0.035, -w * 0.32, h * 0.5, d/2 + 0.03, Mk);
+        break;
+      }
+      case 'barstool': {
+        const h = 0.75;
+        cyl(w * 0.45, 0.05, 0, h, 0, M, 20);
+        cyl(0.025, h, 0, h/2, 0, Md, 10);
+        cyl(w * 0.35, 0.02, 0, 0.01, 0, Md, 20);
+        break;
+      }
+
+      /* ---------- 卫浴 ---------- */
+      case 'toilet': {
+        box(w, 0.65, d * 0.28, 0, 0.325, -d * 0.36, Mw);            // 水箱
+        box(w * 0.9, 0.18, d * 0.55, 0, 0.09, d * 0.1, Mw);
+        const seat = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.45, w * 0.5, 0.1, 18), Mw);
+        seat.scale.z = (d / w) * 0.9;
+        seat.position.set(0, 0.23, d * 0.1);
+        seat.castShadow = true; seat.receiveShadow = true;
+        g.add(seat);
+        break;
+      }
+      case 'vanity': {
+        const h = 0.85;
+        box(w, h - 0.04, d, 0, (h - 0.04)/2, 0, M);
+        box(w * 1.02, 0.04, d * 1.02, 0, h - 0.02, 0, Mw);
+        const R = Math.min(w * 0.32, 0.22);
+        cyl(R, 0.08, 0, h + 0.02, 0, mat('#eef3f6', .3), 20);
+        cyl(0.012, 0.14, 0, h + 0.1, -d * 0.32, mat('#c8ccce', .3), 10);
+        break;
+      }
+      case 'shower': {
+        const gh = 2.0;
+        box(w, 0.04, d, 0, 0.02, 0, Mw);
+        const gm = new THREE.MeshPhysicalMaterial({
+          color: 0xa8c8d4, roughness: .05, transparent: true, opacity: .22,
+          depthWrite: false, side: THREE.DoubleSide,
+        });
+        box(w, gh, 0.01, 0, gh/2, -d/2 + 0.005, gm);
+        box(0.01, gh, d, -w/2 + 0.005, gh/2, 0, gm);
+        box(0.01, gh, d,  w/2 - 0.005, gh/2, 0, gm);
+        cyl(0.018, 0.4, 0, gh - 0.2, -d/2 + 0.1, mat('#c8ccce', .3), 10);
+        break;
+      }
+      case 'bathtub': {
+        box(w, 0.55, d, 0, 0.275, 0, Mw);
+        box(w * 0.85, 0.44, d * 0.78, 0, 0.4, 0, mat('#d8e0e4', .25));
+        break;
+      }
+      case 'washer': case 'dryer': {
+        const h = 0.85;
+        box(w, h, d, 0, h/2, 0, mat(color, .55));
+        const r = Math.min(w, d) * 0.3;
+        const win = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.02, 24), mat('#3d3d3d', .3));
+        win.rotation.x = Math.PI / 2;
+        win.position.set(0, h * 0.55, d/2 + 0.005);
+        g.add(win);
+        const inn = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.72, r * 0.72, 0.02, 24), mat('#c8d4da', .2));
+        inn.rotation.x = Math.PI / 2;
+        inn.position.set(0, h * 0.55, d/2 + 0.012);
+        g.add(inn);
+        break;
+      }
+      case 'waterheater': {
+        const R = Math.min(w, d) / 2;
+        cyl(R, 0.6, 0, 1.5, 0, Mw, 20);
+        cyl(R * 0.4, 0.05, 0, 1.85, 0, mat('#c0c0c0', .4), 12);
+        break;
+      }
+
+      /* ---------- 家电 ---------- */
+      case 'tv': {
+        box(w, 0.6, 0.04, 0, 0.7, 0, mat('#1d1d1f', .3));
+        box(0.1, 0.4, 0.08, 0, 0.2, 0, Mk);
+        box(w * 0.3, 0.02, 0.2, 0, 0.01, 0, Mk);
+        break;
+      }
+      case 'aircon': {
+        const h = 1.8;
+        box(w, h, d, 0, h/2, 0, Mw);
+        box(w * 0.7, 0.4, 0.02, 0, h * 0.85, d/2 + 0.005, mat('#c0c0c0', .4));
+        break;
+      }
+      case 'acwall': {
+        box(w, 0.3, d, 0, 2.3, 0, Mw);
+        box(w * 0.85, 0.02, 0.02, 0, 2.18, d/2 + 0.02, mat('#c0c0c0', .4));
+        break;
+      }
+      case 'dishwasher': {
+        const h = 0.85;
+        box(w, h, d, 0, h/2, 0, mat(color, .5));
+        box(w * 0.9, 0.02, 0.012, 0, h * 0.85, d/2 + 0.005, mat('#c0c0c0', .4));
+        box(w * 0.5, 0.04, 0.04, 0, h * 0.9, d/2 + 0.02, mat('#c0c0c0', .4));
+        break;
+      }
+      case 'ovencol': {
+        const h = 2.0;
+        box(w, h, d, 0, h/2, 0, M);
+        box(w * 0.85, 0.5, 0.02, 0, h * 0.78, d/2 + 0.005, mat('#1d1d1f', .3));
+        box(w * 0.85, 0.5, 0.02, 0, h * 0.25, d/2 + 0.005, mat('#1d1d1f', .3));
+        break;
+      }
+      case 'purifier': {
+        const R = Math.min(w, d) / 2;
+        cyl(R, 0.7, 0, 0.35, 0, Mw, 20);
+        cyl(R * 0.6, 0.05, 0, 0.72, 0, mat('#c0c0c0', .4), 16);
+        break;
+      }
+
+      /* ---------- 书房 · 休闲 ---------- */
+      case 'officechair': {
+        // 五星底座
+        for (let i = 0; i < 5; i++){
+          const a = i * Math.PI * 2 / 5;
+          const l = w * 0.45;
+          const leg = new THREE.Mesh(new THREE.BoxGeometry(l, 0.03, 0.05), Md);
+          leg.position.set(Math.cos(a) * l / 2, 0.03, Math.sin(a) * l / 2);
+          leg.rotation.y = -a;
+          leg.castShadow = true; leg.receiveShadow = true;
+          g.add(leg);
+          cyl(0.03, 0.06, Math.cos(a) * l, 0.03, Math.sin(a) * l, Mk, 8);
+        }
+        cyl(0.04, 0.5, 0, 0.28, 0, Md, 10);
+        box(w * 0.9, 0.1, d * 0.9, 0, 0.55, 0, M);                   // 座面
+        box(w * 0.85, 0.6, 0.08, 0, 0.85, -d/2 + 0.04, M);           // 靠背
+        box(0.05, 0.18, d * 0.6, -w * 0.42, 0.7, 0, Md);
+        box(0.05, 0.18, d * 0.6,  w * 0.42, 0.7, 0, Md);
+        break;
+      }
+      case 'piano': {
+        box(w, 0.9, d * 0.5, 0, 0.45, -d * 0.2, Mk);
+        box(w * 0.9, 0.12, d * 0.4, 0, 0.95, -d * 0.15, Mk);
+        box(w * 0.85, 0.03, d * 0.35, 0, 0.9, d * 0.15, Mw);
+        for (let i = 0; i < 30; i++){
+          const x = -w * 0.42 + i * w * 0.84 / 30;
+          box(0.008, 0.02, d * 0.3, x, 0.915, d * 0.15, Mk);
+        }
+        box(0.06, 0.9, 0.06, -w * 0.42, 0.45, d * 0.4, Mk);
+        box(0.06, 0.9, 0.06,  w * 0.42, 0.45, d * 0.4, Mk);
+        break;
+      }
+      case 'treadmill': {
+        box(w, 0.1, d * 0.9, 0, 0.05, 0, mat(color, .6));
+        box(w * 0.85, 0.05, d * 0.7, 0, 0.11, 0, Mk);
+        box(0.06, 1.0, 0.06, -w * 0.4, 0.6, -d * 0.4, mat(color, .6));
+        box(0.06, 1.0, 0.06,  w * 0.4, 0.6, -d * 0.4, mat(color, .6));
+        box(w, 0.04, 0.04, 0, 1.05, -d * 0.4, mat('#2b2b2b', .5));
+        box(w * 0.5, 0.25, 0.03, 0, 1.1, -d * 0.4, Mk);
+        break;
+      }
+
+      /* ---------- 兜底：方块 ---------- */
+      default: {
+        box(w, 0.6, d, 0, 0.3, 0, M);
+      }
+    }
+    return g;
   }
 
   /* ---------- 同步（重建建筑 + 家具） ---------- */

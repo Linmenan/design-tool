@@ -3,8 +3,8 @@
   "version": 3,
   "meta": {
     "name": "新户型",
-    "createdAt": 1791619438247,
-    "modifiedAt": 1791619438247,
+    "createdAt": 1791619533779,
+    "modifiedAt": 1791619533779,
     "version": 3
   },
   "plan": {
@@ -107,13 +107,13 @@
         "id": "d_fmv1toa8z47",
         "kind": "door",
         "hostWall": "w_fmv1sajgw1",
-        "x0": -577.7502899169922,
+        "x0": 80.2818603515625,
         "y0": 2900,
-        "x1": 322.2497100830078,
+        "x1": 980.2818603515625,
         "y1": 2900,
         "t": 240,
-        "hinge": "left",
-        "swing": "in",
+        "hinge": "right",
+        "swing": "out",
         "entry": false,
         "name": "新门"
       },
