@@ -306,3 +306,28 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
 .app[data-stage="edit"] .radial-menu .radial-item.on{
   background:var(--edit);border-color:var(--edit);
 }
+
+/* ---------- 城市搜索下拉 ---------- */
+.city-picker-pop{
+  position:fixed;left:0;top:0;z-index:9999;
+  display:none;
+  background:#fff;border:1px solid var(--line);border-radius:8px;
+  box-shadow:0 8px 26px rgba(40,30,20,.18);
+  padding:3px;
+  overflow-y:auto;overflow-x:hidden;
+  font-size:13px;
+}
+.city-picker-pop.show{display:block}
+.city-picker-pop .cp-item{
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:6px 10px;border-radius:6px;cursor:pointer;
+  font-variant-numeric:tabular-nums;
+}
+.city-picker-pop .cp-item:hover,
+.city-picker-pop .cp-item.on{background:var(--accent-soft);color:var(--accent)}
+.city-picker-pop .cp-item small{color:var(--muted);font-size:11px;white-space:nowrap}
+.city-picker-pop .cp-empty{padding:10px 12px;color:var(--muted);font-size:12px;text-align:center}
+@media (pointer:coarse){
+  .city-picker-pop{font-size:15px}
+  .city-picker-pop .cp-item{padding:10px 12px}
+}

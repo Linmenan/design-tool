@@ -1,6 +1,8 @@
 import { $, $$, esc, fmt, norm, area, perim, bbox, toast } from '../core/Utils.js';
 import { tr, nm } from '../core/I18n.js';
 import { linearLength, linearDir } from '../data/planData.js';
+import { CityPicker } from './CityPicker.js';
+import { findCity } from '../data/cities.js';
 // 若报 linearLength 未定义，说明 planData.js 不是最新版（需要含 linearLength/linearDir/pointOnLine 的工具函数）
 
 export class PropertyPanel {
@@ -214,32 +216,76 @@ export class PropertyPanel {
 
   /* ---- 指南针 / 位置面板 ---- */
   _compassPanel(){
+    // 干掉上一次可能残留的 CityPicker 下拉，避免面板重建后 DOM 累积
+    if (window.__activeCityPicker){ try { window.__activeCityPicker.destroy(); } catch {} }
+
     const { plan } = this.app.store.state;
     const c = plan.compass || { north:0, lat:39.9, lng:116.4, city:'北京' };
     this._html(`<section><h3>${tr('指南针与位置','Compass & Location')}</h3>
       <div class="form">
         <label>${tr('北向角度','North angle')} (°)<input type="number" id="cpNorth" value="${c.north||0}" step="5" min="0" max="359"></label>
-        <label>${tr('纬度','Latitude')} (°)<input type="number" id="cpLat" value="${c.lat ?? 39.9}" step=".1" min="-89" max="89"></label>
-        <label>${tr('经度','Longitude')} (°)<input type="number" id="cpLng" value="${c.lng ?? 116.4}" step=".1" min="-180" max="180"></label>
-        <label class="full">${tr('城市名（可选）','City (optional)')}<input id="cpCity" value="${esc(c.city||'')}"></label>
+        <label class="full">${tr('城市（输入后从候选选择）','City (type to search)')}
+          <input id="cpCity" value="${esc(c.city||'')}"
+                 placeholder="${tr('如：北京 / 上海 / 杭州 / 广东','e.g. Beijing / Shanghai')}" autocomplete="off"></label>
+        <label>${tr('纬度','Latitude')} (°)<input type="number" id="cpLat" value="${c.lat ?? 39.9}" step=".01" min="-89" max="89"></label>
+        <label>${tr('经度','Longitude')} (°)<input type="number" id="cpLng" value="${c.lng ?? 116.4}" step=".01" min="-180" max="180"></label>
       </div>
-      <div class="muted" style="font-size:12px;margin-top:8px">${tr('北向角度：0° = 画布上方为正北，顺时针为正；用于 3D 中精确计算太阳方位与高度。','0° = up is north, clockwise positive. Used for accurate sun position in 3D.')}</div>
+      <div class="muted" style="font-size:12px;margin-top:8px">${tr(
+        '北向角度：0° = 画布上方为正北，顺时针为正；也可以直接在 2D 罗盘上拖拽指针。经纬度由所选城市自动填充，也可手动微调。',
+        '0° = up is north. Drag the needle on the 2D compass to rotate. Lat/Lng auto-filled from the city.')}</div>
       <div class="actions">
         <button class="btn" id="cpReset">${tr('恢复默认','Reset')}</button>
         <button class="btn" id="cpBack">${tr('← 返回','← Back')}</button>
       </div></section>`);
+
     const store = this.app.store;
-    const upd = () => {
-      const north = ((+$('#cpNorth').value || 0) % 360 + 360) % 360;
-      const lat = Math.max(-89, Math.min(89, +$('#cpLat').value || 39.9));
-      const lng = Math.max(-180, Math.min(180, +$('#cpLng').value || 116.4));
-      const city = $('#cpCity').value.trim();
-      store.mutate('edit compass', s => { s.plan.compass = { north, lat, lng, city }; });
+    const readCommon = () => ({
+      north: ((+$('#cpNorth').value || 0) % 360 + 360) % 360,
+      lat:   Math.max(-89, Math.min(89, +$('#cpLat').value || 39.9)),
+      lng:   Math.max(-180, Math.min(180, +$('#cpLng').value || 116.4)),
+      city:  $('#cpCity').value.trim(),
+    });
+
+    /* 北向 / 经纬度手改 */
+    $('#cpNorth').onchange = () => store.mutate('edit compass', s => { s.plan.compass = readCommon(); });
+    $('#cpLat').onchange   = () => store.mutate('edit compass', s => { s.plan.compass = readCommon(); });
+    $('#cpLng').onchange   = () => store.mutate('edit compass', s => { s.plan.compass = readCommon(); });
+
+    /* 城市搜索选择器：选择后自动同步经纬度 */
+    const cityInput = $('#cpCity');
+    if (cityInput){
+      new CityPicker(cityInput, {
+        onChange: city => {
+          const north = ((+$('#cpNorth').value || 0) % 360 + 360) % 360;
+          // 直接把经纬度写回输入框，再一次性入库，避免二次渲染闪烁
+          $('#cpLat').value = city.lat;
+          $('#cpLng').value = city.lng;
+          store.mutate('set city', s => {
+            s.plan.compass = { north, lat: city.lat, lng: city.lng, city: city.name };
+          });
+        },
+      });
+    }
+
+    /* 若历史数据里的 city 已经是合法城市名，进入面板时同步一次经纬度（用户改了 city 但没更新 lng/lat 的旧数据） */
+    const cur = findCity(c.city);
+    if (cur && (Math.abs(cur.lat - (c.lat ?? 0)) > 1 || Math.abs(cur.lng - (c.lng ?? 0)) > 1)){
+      // 仅提示，不覆盖用户输入
+      const hint = document.createElement('div');
+      hint.className = 'muted';
+      hint.style.cssText = 'font-size:12px;margin-top:6px';
+      hint.textContent = tr(`提示：${cur.name} 对应经纬度约为 ${cur.lat}°, ${cur.lng}°（可点“恢复默认”或从候选重新选择）`,
+                            `Hint: ${cur.name} ≈ ${cur.lat}°, ${cur.lng}°`);
+      $('#panel section')?.appendChild(hint);
+    }
+
+    $('#cpReset').onclick = () => store.mutate('reset compass', s => {
+      s.plan.compass = { north:0, lat:39.9, lng:116.4, city:'北京' };
+    });
+    $('#cpBack').onclick = () => {
+      if (window.__activeCityPicker){ try { window.__activeCityPicker.destroy(); } catch {} }
+      this.app.select(null);
     };
-    ['#cpNorth','#cpLat','#cpLng'].forEach(id => $(id).onchange = upd);
-    $('#cpCity').onchange = upd;
-    $('#cpReset').onclick = () => store.mutate('reset compass', s => { s.plan.compass = { north:0, lat:39.9, lng:116.4, city:'北京' }; });
-    $('#cpBack').onclick = () => this.app.select(null);
   }
 
   _wallPanel(key){
