@@ -109,7 +109,7 @@ export class PlanView {
 
   /* =========================== 渲染 =========================== */
   renderAll(){
-    const steps = ['renderGrid','renderRooms','renderFurn','renderWalls','renderOpenings','renderLabels','renderDims','renderMeasure','renderSel','syncScalebar','syncFooter','syncEditHud'];
+    const steps = ['renderGrid','renderRooms','renderFurn','renderWalls','renderOpenings','renderLabels','renderDims','renderMeasure','renderSel','renderCompass','syncScalebar','syncFooter','syncEditHud'];
     for (const name of steps){
       try { this[name](); } catch (e) { console.error('[PV] ' + name + ' 失败:', e); }
     }
@@ -504,6 +504,31 @@ export class PlanView {
     if (mA && mCur) s += one(mA, mCur, true);
     if (mA) s += `<circle cx="${mA.x}" cy="${mA.y}" r="${3*k}" fill="#2f5d62"/>`;
     $('#gMeasure').innerHTML = s;
+  }
+
+  /* ---- 2D 罗盘：北向与经纬度 ---- */
+  renderCompass(){
+    const el = document.getElementById('compass2d');
+    if (!el) return;
+    const c = (this.app.store.state.plan && this.app.store.state.plan.compass) || { north:0, lat:39.9, lng:116.4, city:'' };
+    const north = ((+c.north || 0) % 360 + 360) % 360;
+    const lat = +c.lat || 0;
+    const lng = +c.lng || 0;
+    const coord = (c.city || '').trim() || `${lat.toFixed(1)}°, ${lng.toFixed(1)}°`;
+    el.innerHTML = `<svg viewBox="-50 -50 100 100">
+      <circle cx="0" cy="0" r="46" fill="rgba(255,253,249,.94)" stroke="#d9d0c1" stroke-width="1.5"/>
+      <line x1="-9" y1="0" x2="9" y2="0" stroke="#c9c0b1" stroke-width=".8"/>
+      <line x1="0" y1="-9" x2="0" y2="9" stroke="#c9c0b1" stroke-width=".8"/>
+      <g transform="rotate(${north})">
+        <polygon points="0,-36 7,-4 0,6 -7,-4" fill="#b5653a" stroke="#8a3d1f" stroke-width=".5"/>
+        <polygon points="0,36 7,4 0,-6 -7,4" fill="#8a8174" stroke="#5a5248" stroke-width=".5"/>
+      </g>
+      <text x="0" y="-39" text-anchor="middle" font-size="10" font-weight="700" fill="#b5653a">N</text>
+      <circle cx="0" cy="0" r="2.5" fill="#2b2824"/>
+      <text x="0" y="43" text-anchor="middle" font-size="6" fill="#7d7366">${esc(coord)}</text>
+    </svg>`;
+    el.title = tr(`北向 ${north}° · 纬度 ${lat}° · 经度 ${lng}°（点击设置）`, `North ${north}° · Lat ${lat}° · Lng ${lng}° (click to set)`);
+    el.onclick = () => this.app.select({ kind: 'compass' });
   }
 
   /* ---- 选中高亮 + 控制点 ---- */

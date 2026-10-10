@@ -1,28 +1,37 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { $, esc, area, clamp01, ease, toast, shade } from '../core/Utils.js';
-import { tr, nm } from '../core/I18n.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { $, toast } from '../core/Utils.js';
+import { tr } from '../core/I18n.js';
 
 const OX = 6000, OY = 5300, H = 2.8, FOV = 45;
-const WALK_FOV = 72;        // 漫游第一人称默认垂直 FOV（≈人眼舒适视野，房间不显闭塞）
-const WALK_FOV_MIN = 50;    // 滚轮调节下限
-const WALK_FOV_MAX = 95;    // 滚轮调节上限
+const WALK_FOV = 72, WALK_FOV_MIN = 50, WALK_FOV_MAX = 95;
 const COARSE = matchMedia('(pointer:coarse)').matches;
 
-/**
- * Scene3D — 极简可运行的 three.js 场景。
- *
- * 相比完整版去掉了：PointerLockControls / RoomEnvironment / CSS2DRenderer
- * 保留完整接口（供 App.js / Toolbar.js 调用）：
- *   init / enter / exit / sync / relang / shot / groundAt / flyToRoom / walking
- *   setMode / setCut / toggle / setHour / goIso / goTop
- *
- * 导出方式：具名 + 默认（两种 import 写法都能拿到）
- */
+const rgbK = (hex, k) => {
+  const n = parseInt(hex.slice(1), 16);
+  const f = v => Math.max(0, Math.min(255, Math.round(v * k)));
+  return `rgb(${f(n >> 16 & 255)},${f(n >> 8 & 255)},${f(n & 255)})`;
+};
+const darken = (hex, k = .8) => '#' + new THREE.Color(hex).multiplyScalar(k).getHexString();
+const lighten = (hex, k = .2) => '#' + new THREE.Color(hex).lerp(new THREE.Color('#ffffff'), k).getHexString();
+
+/** 地板纹理规格：sx/sy 是一块贴图的真实尺寸（米），base 底色、grout 缝色、rough 粗糙度 */
+const TEX = {
+  wood:     { sx: 1.8, sy: .36, base: '#d6b58a', rough: .55 },
+  walnut:   { sx: 1.8, sy: .36, base: '#9a6f4b', rough: .5  },
+  tile800:  { sx: .8,  sy: .8,  base: '#ebe6dd', grout: '#cfc6b7', rough: .3  },
+  tile600:  { sx: .6,  sy: .6,  base: '#dfe3e0', grout: '#bfc6c1', rough: .35 },
+  antislip: { sx: .3,  sy: .3,  base: '#d3d8d4', grout: '#aab2ac', rough: .8  },
+  marble:   { sx: 1.2, sy: 1.2, base: '#f2efe9', grout: '#d9d2c4', rough: .18 },
+  terrazzo: { sx: .5,  sy: .5,  base: '#e6dfd3', rough: .4  },
+  carpet:   { sx: .3,  sy: .3,  base: '#c6bfd2', rough: 1   },
+};
+
 export class Scene3D {
   constructor(app){
     this.app = app;
-    this.opt = { cut:2.8, furn:true, labels:true, night:false, hour:10, mode:'orbit' };
+    this.opt = { cut: H, furn: true, labels: true, night: false, hour: 10, mode: 'orbit' };
     this.active = false;
     this.inited = false;
     this.anim = null;
@@ -32,10 +41,15 @@ export class Scene3D {
     this.furnGrow = 1;
     this.keys = {};
     this.clock = null;
-    this.doors = [];       // 每次 buildArch 后重建，每个元素 { pivot, a0, a1, cur, open }
-    this.walk = null;      // 漫游状态：{ x, z, y, yaw, pitch, speed, runMul, locked }
-    this._joy = null;      // 触屏摇杆输入：{ x, y }（-1..1）
-    this._walkOverlay = null;
+    this.doors = [];
+    this.walk = null;
+    this._joy = null;
+    this.lamps = [];        // 顶灯引用；_applyLight 里按 night 开关
+
+    /* 材质 / 几何缓存 */
+    this._matCache = new Map();
+    this._floorMats = {};
+    this._rngCache = new Map();
   }
 
   /* ---------- 坐标换算 ---------- */
@@ -45,7 +59,960 @@ export class Scene3D {
   SW(){ return $('#stage').clientWidth || 800; }
   SH(){ return $('#stage').clientHeight || 600; }
 
-  /* ---------- 初始化 ---------- */
+  /* ============================================================
+   *  材质 / 随机 / 颜色
+   * ============================================================ */
+  _mat(color, o = {}){
+    const key = color + JSON.stringify(o);
+    if (!this._matCache.has(key)){
+      const m = new THREE.MeshStandardMaterial({ color, roughness: .7, ...o });
+      this._matCache.set(key, m);
+    }
+    return this._matCache.get(key);
+  }
+  _rng(seed){
+    if (this._rngCache.has(seed)) return this._rngCache.get(seed);
+    let s = seed | 0;
+    const fn = () => { s = s + 0x6D2B79F5 | 0; let t = Math.imul(s ^ s >>> 15, 1 | s); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+    this._rngCache.set(seed, fn);
+    return fn;
+  }
+
+  /**
+   * 按房间地面材料 key 生成纹理材质。
+   * 贴图按真实尺寸平铺（RepeatWrapping，UV 单位 = 米）。
+   */
+  _floorMat(kind){
+    if (this._floorMats[kind]) return this._floorMats[kind];
+    const s = TEX[kind] || TEX.tile800;
+    const R = this._rng(kind.length * 977 + 13);
+    const cvs = document.createElement('canvas');
+    const wood = kind === 'wood' || kind === 'walnut';
+    cvs.width  = wood ? 1024 : 512;
+    cvs.height = wood ? 205  : 512;
+    const g = cvs.getContext('2d'), W = cvs.width, Hh = cvs.height;
+    g.fillStyle = s.base; g.fillRect(0, 0, W, Hh);
+
+    if (wood){
+      /* 两排错缝木板 + 木纹曲线 */
+      const rowH = Hh / 2;
+      const joints = [[W * 2 / 3], [W / 3]];
+      for (let r = 0; r < 2; r++){
+        let x0 = 0;
+        [...joints[r], W].forEach(x1 => {
+          g.fillStyle = rgbK(s.base, .9 + R() * .2);
+          g.fillRect(x0, r * rowH, x1 - x0, rowH);
+          g.strokeStyle = rgbK(s.base, .8);
+          g.globalAlpha = .35; g.lineWidth = 1.2;
+          for (let k = 0; k < 7; k++){
+            const y = r * rowH + 6 + R() * (rowH - 12);
+            g.beginPath(); g.moveTo(x0, y);
+            for (let x = x0; x <= x1; x += 40) g.lineTo(x, y + Math.sin(x * .02 + k) * 2.5);
+            g.stroke();
+          }
+          g.globalAlpha = 1;
+          g.fillStyle = rgbK(s.base, .62);
+          g.fillRect(x1 - 1.5, r * rowH, 3, rowH);
+          x0 = x1;
+        });
+        g.fillStyle = rgbK(s.base, .62);
+        g.fillRect(0, r * rowH, W, 2.5);
+      }
+    } else if (kind === 'marble'){
+      /* 大理石：几条横向裂纹 */
+      g.strokeStyle = 'rgba(160,150,135,.35)';
+      for (let k = 0; k < 6; k++){
+        g.lineWidth = 1 + R() * 3;
+        g.beginPath(); g.moveTo(R() * W, 0);
+        g.bezierCurveTo(R() * W, R() * Hh, R() * W, R() * Hh, R() * W, Hh);
+        g.stroke();
+      }
+    } else if (kind === 'terrazzo'){
+      /* 水磨石：撒彩色石子 */
+      const cs = ['#b9a58c', '#8fa3a0', '#c9b7a2', '#a88f76', '#7e8a86'];
+      for (let k = 0; k < 160; k++){
+        g.fillStyle = cs[k % 5];
+        g.beginPath(); g.arc(R() * W, R() * Hh, 2 + R() * 7, 0, 7); g.fill();
+      }
+    } else if (kind === 'carpet'){
+      /* 地毯：细密噪点 */
+      for (let k = 0; k < 3000; k++){
+        g.fillStyle = `rgba(0,0,0,${R() * .05})`;
+        g.fillRect(R() * W, R() * Hh, 2, 2);
+      }
+    } else {
+      /* 地砖：细噪点 */
+      for (let k = 0; k < 1500; k++){
+        g.fillStyle = `rgba(0,0,0,${R() * .04})`;
+        g.fillRect(R() * W, R() * Hh, 2, 2);
+      }
+    }
+    if (s.grout){
+      g.fillStyle = s.grout;
+      g.fillRect(0, 0, W, 3); g.fillRect(0, 0, 3, Hh);
+    }
+
+    const tex = new THREE.CanvasTexture(cvs);
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    tex.repeat.set(1 / s.sx, 1 / s.sy);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    if (this.renderer) tex.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+
+    const m = new THREE.MeshStandardMaterial({ map: tex, roughness: s.rough });
+    this._floorMats[kind] = m;
+    return m;
+  }
+
+  /* ============================================================
+   *  几何工具（y = 底面高度，除 blob / ring 明确说明外）
+   * ============================================================ */
+  _sh(o){ o.castShadow = true; o.receiveShadow = true; return o; }
+  _mesh(geo, m){ return this._sh(new THREE.Mesh(geo, m)); }
+  _box(w, h, d, m, x = 0, y = 0, z = 0){
+    const o = this._mesh(new THREE.BoxGeometry(w, h, d), m);
+    o.position.set(x, y + h / 2, z); return o;
+  }
+  _rbox(w, h, d, m, x = 0, y = 0, z = 0, r = .04){
+    const rr = Math.min(r, w / 2 - .001, h / 2 - .001, d / 2 - .001);
+    const o = this._mesh(new RoundedBoxGeometry(w, h, d, 3, rr), m);
+    o.position.set(x, y + h / 2, z); return o;
+  }
+  _cyl(rt, rb, h, m, x = 0, y = 0, z = 0, seg = 28){
+    const o = this._mesh(new THREE.CylinderGeometry(rt, rb, h, seg), m);
+    o.position.set(x, y + h / 2, z); return o;
+  }
+  _lathe(pts, m, x = 0, y = 0, z = 0, seg = 40){
+    const o = this._mesh(new THREE.LatheGeometry(
+      pts.map(([r, h]) => new THREE.Vector2(Math.max(r, 1e-4), h)), seg), m);
+    o.position.set(x, y, z); return o;
+  }
+  _rod(a, b, r0, m, r1 = r0, seg = 12){
+    const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b);
+    const o = this._mesh(new THREE.CylinderGeometry(r1, r0, A.distanceTo(B), seg), m);
+    o.position.copy(A).add(B).multiplyScalar(.5);
+    o.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), B.sub(A).normalize());
+    return o;
+  }
+  _tube(pts, r, m, seg = 40){
+    const curve = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(...p)), false, 'centripetal');
+    return this._mesh(new THREE.TubeGeometry(curve, seg, r, 10), m);
+  }
+  _blob(rx, ry, rz, m, x = 0, y = 0, z = 0, seg = 24){
+    const o = this._mesh(new THREE.SphereGeometry(1, seg, Math.round(seg * .7)), m);
+    o.scale.set(rx, ry, rz); o.position.set(x, y, z); return o;
+  }
+  _ring(R, r, m, x = 0, y = 0, z = 0){
+    const o = this._mesh(new THREE.TorusGeometry(R, r, 10, 48), m);
+    o.rotation.x = Math.PI / 2; o.position.set(x, y, z); return o;
+  }
+  _rrect(w, d, r){
+    const s = new THREE.Shape(), x = -w / 2, y = -d / 2;
+    r = Math.min(r, w / 2 - .001, d / 2 - .001);
+    s.moveTo(x + r, y); s.lineTo(x + w - r, y); s.quadraticCurveTo(x + w, y, x + w, y + r);
+    s.lineTo(x + w, y + d - r); s.quadraticCurveTo(x + w, y + d, x + w - r, y + d);
+    s.lineTo(x + r, y + d); s.quadraticCurveTo(x, y + d, x, y + d - r);
+    s.lineTo(x, y + r); s.quadraticCurveTo(x, y, x + r, y);
+    return s;
+  }
+  /** 中空圆角框（浴缸/水槽沿）：外 w×d、壁厚 t、高 h */
+  _shell(w, d, h, t, r, m, x = 0, y = 0, z = 0){
+    const s = this._rrect(w, d, r);
+    s.holes.push(this._rrect(w - 2 * t, d - 2 * t, Math.max(.004, r - t)));
+    const geo = new THREE.ExtrudeGeometry(s, { depth: h, bevelEnabled: false, curveSegments: 10 });
+    geo.rotateX(-Math.PI / 2);
+    const o = this._mesh(geo, m); o.position.set(x, y, z); return o;
+  }
+  /** 四条收分腿（椅子、桌子等） */
+  _legs(g, w, d, h, m, inset = .05, r = .02){
+    [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([a, b]) =>
+      g.add(this._rod(
+        [a * (w / 2 - inset), 0, b * (d / 2 - inset)],
+        [a * (w / 2 - inset), h, b * (d / 2 - inset)],
+        r * .7, m, r)));
+  }
+  /** 拉手：y 为拉手中心，z 为门板正面 */
+  _pull(g, len, vert, x, y, z){
+    const m = this._mat('#b9b3a8', { metalness: .85, roughness: .3 }), o = new THREE.Group();
+    o.add(vert ? this._box(.01, len, .01, m, 0, -len / 2, .028)
+              : this._box(len, .01, .01, m, 0, -.005, .028));
+    [-1, 1].forEach(s => o.add(vert
+      ? this._box(.008, .008, .028, m, 0, s * (len / 2 - .015) - .004, .014)
+      : this._box(.008, .008, .028, m, s * (len / 2 - .015), -.004, .014)));
+    o.position.set(x, y, z); g.add(o);
+  }
+  _knob(g, x, y, z){
+    const m = this._mat('#b9b3a8', { metalness: .85, roughness: .3 });
+    const k = this._cyl(.011, .014, .02, m, x, y - .01, z + .01, 16);
+    k.rotation.x = Math.PI / 2;
+    g.add(k, this._blob(.014, .014, .008, m, x, y, z + .022, 12));
+  }
+  /**
+   * 柜门/抽屉面板：x0..x0+w、y0..y0+h 区域内 nx 列 × ny 行。
+   * z = 柜体正面；hd='bar' 金属拉手 | 'knob' 圆钮 | 'edge' 顶部隐形拉槽 | 'none'
+   */
+  _fronts(g, x0, y0, w, h, z, nx, ny, m, hd = 'bar', hy = null){
+    const gap = .005, pw = w / nx, ph = h / ny, fz = z + .018;
+    g.add(this._box(w, h, .002, this._mat('#2a2724', { roughness: .9 }), x0 + w / 2, y0, z + .001));
+    for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++){
+      const cx = x0 + pw * (i + .5), yb = y0 + ph * j;
+      const drawer = ph < .4 && pw >= ph;
+      g.add(this._rbox(pw - gap, ph - gap, .018, m, cx, yb + gap / 2, z + .009, .003));
+      if (hd === 'none') continue;
+      if (hd === 'edge'){ g.add(this._box(pw - .05, .01, .006, this._mat('#3c3a37', { roughness: .6 }), cx, yb + ph - gap - .018, fz)); continue; }
+      if (drawer){
+        hd === 'knob' ? this._knob(g, cx, yb + ph / 2, fz)
+                      : this._pull(g, Math.min(.3, pw * .45), false, cx, yb + ph / 2, fz);
+        continue;
+      }
+      const len = Math.min(.45, ph * .35);
+      const hx = nx === 1 ? cx + pw / 2 - .045 : (i % 2 ? cx - pw / 2 + .04 : cx + pw / 2 - .04);
+      const y = Math.min(yb + ph - .05 - len / 2, Math.max(yb + .05 + len / 2, hy ?? yb + ph / 2));
+      hd === 'knob' ? this._knob(g, hx, y, fz) : this._pull(g, len, true, hx, y, fz);
+    }
+  }
+  _plate(g, r, x, y, z){
+    g.add(this._lathe([[0, 0], [r * .6, 0], [r * .72, .008], [r, .02]],
+      this._mat('#fbfbf9', { roughness: .12, side: THREE.DoubleSide }), x, y, z, 32));
+  }
+  _vase(g, x, y, z, r, h, c, R, flowers = true){
+    const pts = [[0, 0], [r * .65, 0], [r, h * .32], [r * .92, h * .62], [r * .42, h * .86], [r * .5, h]];
+    g.add(this._lathe(pts, this._mat(c, { roughness: .35, side: THREE.DoubleSide }), x, y, z, 32));
+    if (!flowers) return;
+    const cols = ['#f3e6d8', '#e8b4a0', '#f6d27a', '#ffffff'];
+    for (let k = 0; k < 5; k++){
+      const a = k * 1.26 + R() * .4, s = .03 + R() * .05;
+      const top = [x + Math.cos(a) * s, y + h + .12 + R() * .14, z + Math.sin(a) * s];
+      g.add(this._rod([x, y + h * .6, z], top, .003, this._mat('#6f8f4a', { roughness: .7 }), .003, 6),
+            this._blob(.022, .018, .022, this._mat(cols[k % 4], { roughness: .8 }), ...top, 12));
+    }
+  }
+  _tableLamp(g, x, y, z, s = 1){
+    g.add(this._lathe([[0, 0], [.06 * s, 0], [.075 * s, .05 * s], [.08 * s, .12 * s], [.055 * s, .2 * s], [.018 * s, .25 * s], [.012 * s, .3 * s]],
+      this._mat('#fbfbf9', { roughness: .3 }), x, y, z, 32));
+    g.add(this._lathe([[.13 * s, 0], [.1 * s, .18 * s]],
+      this._mat('#f6ecd9', { emissive: '#ffdca0', emissiveIntensity: .35, roughness: .9, side: THREE.DoubleSide }),
+      x, y + .26 * s, z, 40),
+      this._blob(.03 * s, .03 * s, .03 * s, this._mat('#fff', { emissive: '#ffe2b0', emissiveIntensity: 1, roughness: .6 }), x, y + .31 * s, z, 12));
+  }
+
+  /* ============================================================
+   *  家具模型（局部坐标：原点在俯视中心、y=0 为底面，宽沿 X、深沿 Z）
+   * ============================================================ */
+  _furnMesh(type, w, d, color){
+    const g = new THREE.Group();
+    const M = this._mat(color, { roughness: .78 });
+    const Md = this._mat(darken(color, .72), { roughness: .82 });
+    const Ml = this._mat(lighten(color, .22), { roughness: .55 });
+    const R = this._rng(Math.round(w * 1000) + Math.round(d * 1000) + (type.charCodeAt(0) || 0) * 7);
+
+    const woodM = c => this._mat(c, { roughness: .55 });
+    const fabric = c => this._mat(c, { roughness: .96 });
+    const ceramic = (o = {}) => this._mat('#fbfbf9', { roughness: .12, ...o });
+    const blackMetal = () => this._mat('#2b2b2d', { metalness: .6, roughness: .4 });
+    const hwMat = () => this._mat('#b9b3a8', { metalness: .85, roughness: .3 });
+    const chrome = () => this._mat('#eef0f2', { metalness: 1, roughness: .08 });
+    const mirror = () => this._mat('#dfeaee', { metalness: .55, roughness: .06 });
+    const screenMat = (glow = '#1a2636') => this._mat('#0b0e13', { roughness: .1, metalness: .3, emissive: glow, emissiveIntensity: .35 });
+    const glowMat = (c = '#fff4dc', e = '#ffdca0', k = .5) => this._mat(c, { emissive: e, emissiveIntensity: k, roughness: .9, side: THREE.DoubleSide });
+    const bz = -d / 2;
+
+    switch (type){
+      /* ---------- 卧室 ---------- */
+      case 'bed': {
+        const fr = woodM('#8d7258'), fab = fabric(color);
+        const fh = .3, mt = .22, top = fh + mt, n = Math.max(3, Math.round(w / .28)), sw = (w - .04) / n;
+        g.add(this._box(w - .12, .06, d - .14, this._mat('#4a3e33', { roughness: .7 }), 0, 0, .03));
+        g.add(this._rbox(w, fh - .06, d - .08, fr, 0, .06, .04, .015));
+        g.add(this._rbox(w, 1.08, .06, fr, 0, 0, bz + .03, .012));
+        for (let i = 0; i < n; i++)
+          g.add(this._rbox(sw - .006, .62, .06, fabric(darken(color, .8)), -w / 2 + .02 + sw * (i + .5), .42, bz + .08, .025));
+        const md = d - .13, dd = md * .66, dz = d / 2 - .015 - dd / 2;
+        g.add(this._rbox(w - .06, mt, md, this._mat('#f6f3ee', { roughness: .35 }), 0, fh, bz + .11 + md / 2, .07));
+        g.add(this._rbox(w + .02, .27, dd, fab, 0, top - .2, dz, .04),
+              this._rbox(w + .024, .06, .22, fabric('#fbfaf7'), 0, top + .025, dz - dd / 2 + .11, .025));
+        g.add(this._rbox(w + .05, .285, .42, fabric(darken(color, .62)), 0, top - .205, d / 2 - .35, .03));
+        const np = w >= 1.3 ? 2 : 1, pw = (w - .16 - (np - 1) * .06) / np;
+        for (let i = 0; i < np; i++){
+          const x = -w / 2 + .08 + pw / 2 + i * (pw + .06);
+          const p1 = this._rbox(pw, .15, .42, fabric('#ffffff'), x, top - .01, bz + .34, .07); p1.rotation.x = -.28;
+          const p2 = this._rbox(pw * .62, .3, .1, fabric(i ? '#efe7da' : darken(color, .7)), x, top, bz + .54, .045); p2.rotation.x = -.3;
+          g.add(p1, p2);
+        }
+        break;
+      }
+      case 'crib': {
+        const wm = woodM(color);
+        g.add(this._rbox(w - .09, .12, d - .09, fabric('#ffffff'), 0, .3, 0, .04),
+              this._box(w - .06, .025, d - .06, wm, 0, .28));
+        [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([a, b]) =>
+          g.add(this._rbox(.045, .95, .045, wm, a * (w / 2 - .022), 0, b * (d / 2 - .022), .008),
+                this._blob(.028, .028, .028, wm, a * (w / 2 - .022), .97, b * (d / 2 - .022), 14)));
+        [-1, 1].forEach(s => {
+          const z = s * (d / 2 - .022), x = s * (w / 2 - .022);
+          g.add(this._rbox(w - .05, .035, .03, wm, 0, .88, z, .008),
+                this._rbox(w - .05, .035, .03, wm, 0, .25, z, .008),
+                this._rbox(.03, .035, d - .05, wm, x, .88, 0, .008),
+                this._rbox(.03, .035, d - .05, wm, x, .25, 0, .008));
+          for (let p = -w / 2 + .09; p < w / 2 - .05; p += .075)
+            g.add(this._rod([p, .28, z], [p, .88, z], .009, wm, .009, 8));
+          for (let p = -d / 2 + .09; p < d / 2 - .05; p += .075)
+            g.add(this._rod([x, .28, p], [x, .88, p], .009, wm, .009, 8));
+        });
+        g.add(this._rbox(w * .5, .03, d - .14, fabric('#f3d9c9'), w * .12, .42, 0, .015),
+              this._rbox(.3, .06, .2, fabric('#fbfaf7'), -w / 2 + .22, .42, 0, .03));
+        const bx = -w * .3 + .1, bear = '#c9a27a';
+        g.add(this._blob(.05, .06, .045, this._mat(bear, { roughness: .95 }), bx, .5, .12),
+              this._blob(.045, .042, .04, this._mat(bear, { roughness: .95 }), bx, .59, .12),
+              this._blob(.016, .016, .01, this._mat(bear, { roughness: .95 }), bx - .032, .625, .12),
+              this._blob(.016, .016, .01, this._mat(bear, { roughness: .95 }), bx + .032, .625, .12));
+        break;
+      }
+      case 'nightstand': {
+        const wm = woodM(color);
+        this._legs(g, w, d, .1, woodM('#5a4a3b'), .04, .014);
+        g.add(this._rbox(w, .4, d - .02, wm, 0, .1, -.01, .012));
+        this._fronts(g, -w / 2 + .02, .12, w - .04, .36, d / 2 - .02, 1, 2, wm, 'bar');
+        this._tableLamp(g, -w * .12, .5, -d * .12);
+        g.add(this._box(.16, .025, .22, this._mat('#2f5d62', { roughness: .5 }), w * .24, .5, .04),
+              this._box(.14, .02, .2, this._mat('#e6dccd', { roughness: .7 }), w * .24, .525, .04));
+        break;
+      }
+      case 'wardrobe': {
+        const cm = this._mat(color, { roughness: .55 }), h = 2.2, fz = d / 2 - .02, n = Math.max(1, Math.round(w / .5));
+        g.add(this._box(w - .02, .08, d - .06, this._mat('#4a4641', { roughness: .7 }), 0, 0, -.03),
+              this._box(w, h - .08, d - .02, cm, 0, .08, -.01));
+        this._fronts(g, -w / 2, .08, w, h - .1, fz, n, 1, cm, 'bar', 1.05);
+        g.add(this._box(w, .02, d - .02, this._mat(darken(color, .9), { roughness: .5 }), 0, h - .02, -.01));
+        break;
+      }
+      case 'dresser': {
+        const wm = woodM(color), r = Math.min(.34, w * .3);
+        [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([a, b]) =>
+          g.add(this._rod([a * (w / 2 - .04), 0, b * (d / 2 - .04)], [a * (w / 2 - .05), .58, b * (d / 2 - .05)], .012, wm, .02)));
+        g.add(this._box(w - .04, .14, d - .04, wm, 0, .58), this._rbox(w, .03, d, wm, 0, .72, 0, .008));
+        this._fronts(g, -w / 2 + .03, .585, w - .06, .13, d / 2 - .02, 2, 1, wm, 'knob');
+        const mr = this._mesh(new THREE.TorusGeometry(r, .018, 12, 64), woodM(darken(color, .7)));
+        mr.position.set(0, .77 + r, bz + .04); g.add(mr);
+        const mg = new THREE.Mesh(new THREE.CircleGeometry(r, 64), mirror());
+        mg.position.set(0, .77 + r, bz + .035); g.add(mg);
+        g.add(this._box(.08, .03, .06, woodM(darken(color, .7)), 0, .75, bz + .04));
+        [['#e7c9b5', .03, .09], ['#b9d0d8', .025, .12], ['#f0e3cf', .02, .07]].forEach(([cc, rr, hh], i) =>
+          g.add(this._cyl(rr, rr, hh, this._mat(cc, { roughness: .15, transparent: true, opacity: .8 }), w * .25 + i * .06, .75, .02)));
+        g.add(this._rbox(.16, .06, .1, woodM('#6b543f'), -w * .28, .75, .03, .01));
+        const sz = d / 2 + .25;
+        [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([a, b]) =>
+          g.add(this._rod([a * .13, 0, sz + b * .13], [a * .12, .4, sz + b * .12], .01, wm, .014)));
+        g.add(this._rbox(.34, .08, .34, fabric('#e8ddd0'), 0, .4, sz, .035));
+        break;
+      }
+      case 'desk': {
+        const tm = woodM(color), bm = blackMetal();
+        g.add(this._rbox(w, .025, d, tm, 0, .72, 0, .006));
+        [-1, 1].forEach(s => {
+          const x = s * (w / 2 - .06);
+          g.add(this._box(.03, .72, .03, bm, x, 0, d / 2 - .06),
+                this._box(.03, .72, .03, bm, x, 0, bz + .06),
+                this._box(.03, .03, d - .1, bm, x, 0, 0),
+                this._box(.03, .03, d - .1, bm, x, .69, 0));
+        });
+        g.add(this._box(w - .12, .04, .015, bm, 0, .66, bz + .06),
+              this._box(.4, .09, d - .12, tm, w / 2 - .32, .63, 0));
+        this._pull(g, .16, false, w / 2 - .32, .675, d / 2 - .06);
+        const my = .745, mz = bz + .15;
+        g.add(this._rbox(.22, .012, .16, bm, 0, my, mz, .004),
+              this._rod([0, my, mz - .02], [0, my + .2, mz - .03], .012, bm));
+        g.add(this._rbox(.62, .37, .02, this._mat('#1d1d1f', { roughness: .5 }), 0, my + .12, mz - .04, .006),
+              this._box(.6, .33, .002, screenMat('#27405c'), 0, my + .15, mz - .029));
+        g.add(this._rbox(.42, .015, .13, this._mat('#e8e8ea', { roughness: .5 }), 0, my, .06, .004),
+              this._rbox(.4, .004, .11, this._mat('#d2d2d6', { roughness: .5 }), 0, my + .014, .06, .002),
+              this._blob(.03, .015, .05, this._mat('#e8e8ea', { roughness: .5 }), .3, my + .012, .07, 16));
+        const lx = -w / 2 + .15, lz = bz + .12;
+        g.add(this._cyl(.07, .075, .02, bm, lx, my, lz, 28),
+              this._tube([[lx, my + .02, lz], [lx, my + .3, lz + .03], [lx + .12, my + .42, lz + .1]], .008, bm));
+        g.add(this._cyl(.04, .038, .09, ceramic({ roughness: .3 }), w / 2 - .15, my, .05, 20),
+              this._rbox(.2, .015, .28, this._mat('#3b5566', { roughness: .7 }), -w / 2 + .3, my, .1, .004));
+        break;
+      }
+      case 'chair': {
+        const lw = woodM('#6b543f'), fab = fabric(color), sy = .44;
+        [-1, 1].forEach(s => g.add(this._rod([s * (w / 2 - .04), 0, d / 2 - .05], [s * (w / 2 - .05), sy, d / 2 - .07], .012, lw, .018)));
+        [-1, 1].forEach(s => g.add(this._rod([s * (w / 2 - .04), 0, bz + .03], [s * (w / 2 - .05), .86, bz + .07], .012, lw, .018)));
+        g.add(this._box(w - .08, .025, .02, lw, 0, .15, d / 2 - .06),
+              this._box(w - .08, .025, .02, lw, 0, .15, bz + .05));
+        [-1, 1].forEach(s => g.add(this._box(.02, .025, d - .12, lw, s * (w / 2 - .045), .18, 0)));
+        g.add(this._box(w - .06, .04, d - .1, lw, 0, sy - .03, 0),
+              this._rbox(w - .04, .05, d - .08, fab, 0, sy, .005, .022));
+        const b1 = this._rbox(w - .08, .15, .025, lw, 0, .66, bz + .065, .012); b1.rotation.x = -.12;
+        const b2 = this._box(w - .08, .025, .02, lw, 0, .52, bz + .055); b2.rotation.x = -.12;
+        g.add(b1, b2);
+        break;
+      }
+      case 'bookshelf': {
+        const h = 1.8, t = .022, ns = 5, wm = woodM(color), sh0 = (h - .06 - t) / ns;
+        const cols = ['#b88a6a', '#6f8f8a', '#d9c08c', '#9aa58c', '#a8675e', '#e6dccd', '#7d8ea3', '#c9bfae'];
+        g.add(this._box(w, h, .012, woodM(darken(color, .85)), 0, 0, bz + .006),
+              this._box(t, h, d, wm, -w / 2 + t / 2),
+              this._box(t, h, d, wm, w / 2 - t / 2),
+              this._box(w - 2 * t, .06, d - .03, wm, 0, 0, 0));
+        for (let s = 0; s <= ns; s++){
+          const y = s < ns ? .06 + s * sh0 : h - t;
+          g.add(this._box(w - 2 * t, t, d - .012, wm, 0, y, .006));
+          if (s === ns) break;
+          const yb = y + t, end = w / 2 - t - .01; let x = -w / 2 + t + .01;
+          const deco = R() < .55 ? x + R() * (w - .45) : 99;
+          while (x < end - .03){
+            if (x >= deco){
+              if (R() < .5) this._vase(g, x + .07, yb, 0, .045, .16, cols[Math.floor(R() * 8)], R, false);
+              else for (let k = 0; k < 3; k++)
+                g.add(this._box(.2 - k * .02, .028, d * .7, this._mat(cols[Math.floor(R() * 8)], { roughness: .8 }), x + .1, yb + k * .028, .01));
+              x += .2; continue;
+            }
+            if (R() < .07){ x += .03 + R() * .05; continue; }
+            const bw = .018 + R() * .03, bh = Math.min(sh0 - t - .03, .17 + R() * .13), bd = d * (.62 + R() * .22);
+            if (x + bw > end) break;
+            g.add(this._box(bw, bh, bd, this._mat(cols[Math.floor(R() * 8)], { roughness: .75 }), x + bw / 2, yb, d / 2 - .015 - bd / 2));
+            x += bw + .002;
+          }
+        }
+        break;
+      }
+      case 'baycushion': {
+        g.add(this._rbox(w, .08, d, fabric(color), 0, .45, 0, .03));
+        const b1 = this._rbox(w - .1, .34, .14, fabric('#ffffff'), 0, .52, bz + .14, .06); b1.rotation.x = .25;
+        const b2 = this._rbox(w - .1, .34, .14, fabric('#f0e6d6'), 0, .52, d / 2 - .14, .06); b2.rotation.x = -.25;
+        g.add(b1, b2,
+              this._rbox(w * .8, .04, .3, fabric(darken(color, .7)), 0, .53, d * .12, .02),
+              this._rbox(.28, .015, .2, woodM('#8d7258'), 0, .53, -d * .15, .006),
+              this._cyl(.035, .03, .06, ceramic(), 0, .545, -d * .15, 20));
+        break;
+      }
+
+      /* ---------- 客厅 ---------- */
+      case 'sofa': case 'armchair': {
+        const fab = fabric(color), dk = fabric(darken(color, .88));
+        const a = Math.min(.18, w * .14), n = type === 'armchair' ? 1 : (w > 2.2 ? 3 : 2), cw = (w - 2 * a) / n;
+        const bd = Math.min(.2, d * .24), lh = .12, sd = d - bd - .02;
+        this._legs(g, w, d, lh, woodM('#3a3027'), .07, .018);
+        g.add(this._rbox(w, .16, d, dk, 0, lh, 0, .03), this._rbox(w, .73, bd, dk, 0, lh, bz + bd / 2, .06));
+        [-1, 1].forEach(s => g.add(this._rbox(a, .5, d, dk, s * (w / 2 - a / 2), lh, 0, .07)));
+        for (let i = 0; i < n; i++){
+          const x = -w / 2 + a + cw / 2 + i * cw;
+          const c1 = this._rbox(cw - .012, .15, sd, fab, x, lh + .16, bz + bd + sd / 2, .055);
+          const c2 = this._rbox(cw - .03, .44, .16, fab, x, lh + .3, bz + bd + .08, .07); c2.rotation.x = -.16;
+          g.add(c1, c2);
+        }
+        if (n > 1) [-1, 1].forEach(s => {
+          const p = this._rbox(.42, .42, .12, fabric(s < 0 ? '#ece5d8' : darken(color, .7)), s * (w / 2 - a - .26), lh + .32, bz + bd + .22, .06);
+          p.rotation.set(-.3, s * -.25, 0); g.add(p);
+        });
+        else {
+          const p = this._rbox(.4, .26, .1, fabric('#ece5d8'), 0, lh + .33, bz + bd + .2, .05); p.rotation.x = -.25; g.add(p);
+        }
+        break;
+      }
+      case 'cornersofa': {
+        const k = Math.min(.95, d * .56, w * .4), b = .2, fab = fabric(color), dk = fabric(darken(color, .88)), lh = .1, sw = (w - b - .2) / 2;
+        [[-w/2+.07, bz+.07], [w/2-.07, bz+.07], [w/2-.07, bz+k-.07], [-w/2+.07, d/2-.07], [-w/2+k-.07, d/2-.07], [-w/2+k-.07, bz+k-.07]]
+          .forEach(([x, z]) => g.add(this._rod([x, 0, z], [x, lh, z], .012, woodM('#3a3027'), .018)));
+        g.add(this._rbox(w, .18, k, dk, 0, lh, bz + k / 2, .03),
+              this._rbox(k, .18, d - k + .02, dk, -w / 2 + k / 2, lh, bz + k + (d - k) / 2 - .01, .03),
+              this._rbox(w, .72, b, dk, 0, lh, bz + b / 2, .06),
+              this._rbox(b, .72, d, dk, -w / 2 + b / 2, lh, 0, .06),
+              this._rbox(.2, .5, k, dk, w / 2 - .1, lh, bz + k / 2, .07),
+              this._rbox(k, .5, .2, dk, -w / 2 + k / 2, lh, d / 2 - .1, .07));
+        for (let i = 0; i < 2; i++){
+          const x = -w / 2 + b + sw / 2 + i * sw;
+          const c1 = this._rbox(sw - .012, .15, k - b - .02, fab, x, lh + .18, bz + b + (k - b) / 2, .055);
+          const c2 = this._rbox(sw - .04, .42, .16, fab, x, lh + .3, bz + b + .07, .07); c2.rotation.x = -.16;
+          g.add(c1, c2);
+        }
+        g.add(this._rbox(k - b - .02, .15, d - k - .22, fab, -w / 2 + b + (k - b) / 2, lh + .18, bz + k + (d - k - .2) / 2, .055));
+        const L = d - .2 - b - .18, nl = Math.max(1, Math.round(L / .75));
+        for (let i = 0; i < nl; i++){
+          const p = this._rbox(.16, .42, L / nl - .03, fab, -w / 2 + b + .07, lh + .3, bz + b + .18 + L / nl * (i + .5), .07);
+          p.rotation.z = .16; g.add(p);
+        }
+        break;
+      }
+      case 'beanbag': {
+        const fab = fabric(color);
+        g.add(this._blob(w * .5, .3, d * .5, fab, 0, .3, 0, 40),
+              this._blob(w * .42, .22, d * .22, fab, 0, .5, bz + d * .26, 32));
+        break;
+      }
+      case 'coffeetable': {
+        const tm = this._mat(color, { roughness: .35 }), lw = woodM('#3a3027');
+        [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([a, b]) =>
+          g.add(this._rod([a * (w / 2 - .05), 0, b * (d / 2 - .05)], [a * (w / 2 - .07), .365, b * (d / 2 - .07)], .012, lw, .02)));
+        g.add(this._rbox(w, .035, d, tm, 0, .365, 0, .015),
+              this._rbox(w - .12, .02, d - .12, woodM(darken(color, .85)), 0, .12, 0, .006),
+              this._box(.3, .03, .22, this._mat('#2f5d62', { roughness: .5 }), w * .2, .14, 0),
+              this._box(.26, .025, .19, this._mat('#d9b36c', { roughness: .6 }), w * .2, .17, .01),
+              this._rbox(.38, .015, .24, woodM('#6b543f'), -w * .2, .4, 0, .006),
+              this._box(.22, .025, .16, this._mat('#e6dccd', { roughness: .7 }), -w * .22, .415, 0));
+        g.add(this._lathe([[0, 0], [.025, 0], [.035, .07], [.034, .08]], ceramic({ side: THREE.DoubleSide }), -w * .12, .415, .06, 20));
+        this._vase(g, w * .24, .4, -.05, .055, .18, '#e9e2d6', R);
+        break;
+      }
+      case 'sidetable': {
+        const r = Math.min(w, d) / 2, bm = blackMetal();
+        g.add(this._lathe([[r * .55, 0], [r * .55, .012], [.03, .035], [.018, .3], [.025, .5], [.08, .52]], bm, 0, 0, 0, 40),
+              this._cyl(r, r * .98, .025, this._mat(color, { roughness: .35 }), 0, .52, 0, 48),
+              this._box(.16, .02, .12, this._mat('#4f6b8a', { roughness: .7 }), -r * .25, .545, 0));
+        this._vase(g, r * .35, .545, -r * .1, .035, .12, '#e9e2d6', R, false);
+        break;
+      }
+      case 'tvstand': {
+        const sm = this._mat(color, { roughness: .5 }), n = Math.max(2, Math.round(w / .6));
+        this._legs(g, w, d, .1, blackMetal(), .08, .012);
+        g.add(this._rbox(w, .4, d - .02, sm, 0, .1, -.01, .01));
+        this._fronts(g, -w / 2 + .005, .105, w - .01, .39, d / 2 - .02, n, 1, sm, 'edge');
+        g.add(this._rbox(1.45, .84, .025, this._mat('#18181a', { roughness: .4, metalness: .3 }), 0, .95, bz + .03, .004),
+              this._box(1.43, .81, .002, screenMat(), 0, .962, bz + .0435),
+              this._rbox(.9, .06, .09, this._mat('#2a2a2c', { roughness: .7 }), 0, .5, -.02, .02),
+              this._box(.86, .045, .002, fabric('#3a3a3c'), 0, .507, .026));
+        this._vase(g, w / 2 - .25, .5, 0, .06, .26, '#d8cfc2', R);
+        break;
+      }
+      case 'rug':
+        [[w, d, .01, color, 0], [w - .16, d - .16, .002, darken(color, .82), .01], [w - .26, d - .26, .002, lighten(color, .12), .0115]]
+          .forEach(([a, b, h, cc, y]) => {
+            const r = this._box(a, h, b, this._mat(cc, { roughness: 1 }), 0, y + .002);
+            r.castShadow = false; g.add(r);
+          });
+        break;
+      case 'plant': {
+        const r = Math.min(w, d) / 2, H = .9 + r * 1.6;
+        const pot = this._mat('#d9d2c5', { roughness: .6 });
+        const lm = [this._mat('#5f8f4e', { roughness: .6, side: THREE.DoubleSide }), this._mat('#79a862', { roughness: .6, side: THREE.DoubleSide })];
+        g.add(this._lathe([[0, 0], [r * .4, 0], [r * .44, .02], [r * .54, .36], [r * .57, .4], [r * .52, .4], [r * .5, .37], [0, .37]], pot, 0, 0, 0, 36),
+              this._cyl(r * .49, r * .49, .005, this._mat('#4a3a2c', { roughness: .9 }), 0, .368, 0, 28));
+        g.add(this._rod([0, .37, 0], [.02, H * .62, -.01], .016, this._mat('#6b5540', { roughness: .8 }), .009));
+        const N = 20 + Math.round(r * 36), sc = Math.sqrt(r / .25);
+        for (let k = 0; k < N; k++){
+          const t = k / N, a = k * 2.399 + R() * .3;
+          const len = (.14 + R() * .08) * (1.1 - t * .4) * sc, s0 = .03 + R() * .08 * sc;
+          const p = new THREE.Group();
+          p.position.set(0, H * (.42 + .58 * t), 0);
+          p.rotation.set(0, -a, .1 + t * .5 + R() * .3, 'YXZ');
+          const lf = this._blob(len / 2, .005, len * .27, lm[k % 2], s0 + len / 2, 0, 0, 16); lf.rotation.z = -.3;
+          p.add(this._box(s0, .005, .005, this._mat('#6f8f4a', { roughness: .7 }), s0 / 2, 0, 0), lf);
+          g.add(p);
+        }
+        break;
+      }
+      case 'floorlamp': {
+        const r = Math.min(w, d) / 2, lm = this._mat(color, { roughness: .35, metalness: .5 });
+        g.add(this._lathe([[0, 0], [r * .55, 0], [r * .58, .012], [r * .5, .03], [.02, .035]], lm, 0, 0, 0, 40),
+              this._rod([0, .03, 0], [0, 1.36, 0], .011, lm));
+        g.add(this._lathe([[r * .85, 0], [r * .55, .36]], glowMat('#f6ecd9', '#ffdca0', .45), 0, 1.22, 0, 48),
+              this._blob(.035, .035, .035, glowMat('#fff', '#ffe2b0', 1.2), 0, 1.36, 0, 12),
+              this._ring(r * .85, .004, lm, 0, 1.22, 0),
+              this._ring(r * .55, .004, lm, 0, 1.58, 0));
+        break;
+      }
+
+      /* ---------- 餐厨 ---------- */
+      case 'table': {
+        const tm = this._mat(color, { roughness: .4 }), lw = woodM(darken(color, .55));
+        const ns = Math.max(1, Math.round(w / .62)), top = .75;
+        [[-1,-1],[1,-1],[-1,1],[1,1]].forEach(([a, b]) =>
+          g.add(this._rod([a * (w / 2 - .08), 0, b * (d / 2 - .08)], [a * (w / 2 - .1), .715, b * (d / 2 - .1)], .016, lw, .026)));
+        g.add(this._rbox(w, .035, d, tm, 0, .715, 0, .012),
+              this._box(w - .22, .07, d - .22, lw, 0, .645),
+              this._box(w * .7, .003, .32, fabric('#b9a58c'), 0, top, 0));
+        for (let i = 0; i < ns; i++) [-1, 1].forEach(s => {
+          const x = -w / 2 + w / ns * (i + .5), z = s * (d / 2 - .17);
+          g.add(this._box(.38, .003, .28, fabric('#e7dfd1'), x, top, z));
+          this._plate(g, .12, x, top + .003, z);
+          g.add(this._cyl(.03, .026, .1, this._mat('#dfeef3', { transparent: true, opacity: .35, roughness: .05 }), x + .15, top + .003, z - s * .1, 16));
+        });
+        this._vase(g, 0, top + .003, 0, .06, .2, '#e9e2d6', R);
+        break;
+      }
+      case 'roundtable': {
+        const b = Math.min(.25, w * .3), lw = woodM('#4a3e33'), top = .75;
+        g.add(this._lathe([[b, 0], [b, .015], [b * .8, .035], [.06, .12], [.045, .35], [.05, .6], [.12, .69], [.18, .715]], lw, 0, 0, 0, 40),
+              this._cyl(w / 2, w / 2, .035, this._mat(color, { roughness: .4 }), 0, .715, 0, 64));
+        for (let k = 0; k < 4; k++){
+          const a = k * Math.PI / 2 + .4, rr = w / 2 - .17;
+          this._plate(g, .11, Math.cos(a) * rr, top, Math.sin(a) * rr);
+        }
+        this._vase(g, 0, top, 0, .05, .18, '#e9e2d6', R);
+        break;
+      }
+      case 'counter': {
+        const cm = this._mat(color, { roughness: .45 }), stone = this._mat('#dcd7cf', { roughness: .22 });
+        const n = Math.max(1, Math.round(w / .6)), fz = d / 2 - .04;
+        g.add(this._box(w - .01, .1, d - .1, this._mat('#4a4641', { roughness: .7 }), 0, 0, -.05),
+              this._box(w, .72, d - .04, cm, 0, .1, -.02));
+        this._fronts(g, -w / 2, .64, w, .18, fz, n, 1, cm, 'bar');
+        this._fronts(g, -w / 2, .1, w, .54, fz, n, 1, cm, 'bar', .56);
+        g.add(this._rbox(w + .01, .04, d, stone, 0, .82, 0, .004),
+              this._box(w, .62, .01, this._mat('#efece6', { roughness: .3 }), 0, .86, bz + .005));
+        g.add(this._box(w, .7, .33, cm, 0, 1.48, bz + .165));
+        this._fronts(g, -w / 2, 1.48, w, .7, bz + .33, n, 1, cm, 'bar', 1.56);
+        g.add(this._box(w - .04, .01, .02, glowMat('#fff7e6', '#ffe9c4', .8), 0, 1.47, bz + .29));
+        if (w >= .8){
+          g.add(this._rbox(.36, .018, .25, woodM('#c9a27a'), -w / 2 + .3, .86, 0, .005));
+          [.07, .06, .05].forEach((r, i) =>
+            g.add(this._cyl(r, r, .16 - i * .03, this._mat(['#e9e2d6', '#d6cfc3', '#bfb6a8'][i], { roughness: .4 }), w / 2 - .15 - i * .15, .86, bz + .1, 24)));
+          g.add(this._cyl(.05, .045, .14, ceramic({ roughness: .3 }), w / 2 - .6, .86, bz + .1, 20));
+          for (let k = 0; k < 4; k++)
+            g.add(this._rod([w / 2 - .6, .9, bz + .1], [w / 2 - .6 + (k - 1.5) * .018, 1.1, bz + .1 + (k % 2 - .5) * .02], .005, woodM('#8d7258'), .006, 6));
+        }
+        break;
+      }
+      case 'stove': {
+        const sm = this._mat('#b9bec3', { metalness: .8, roughness: .3 });
+        g.add(this._rbox(w, .012, d, this._mat('#0d0d0e', { roughness: .06, metalness: .3 }), 0, .862, 0, .004));
+        (w / d > 1.4 ? [[-w/4, 0], [w/4, 0]] : [[-w/4,-d/4],[w/4,-d/4],[-w/4,d/4],[w/4,d/4]]).forEach(([x, z]) => {
+          g.add(this._cyl(.085, .09, .008, this._mat('#2b2b2b', { roughness: .4 }), x, .874, z, 32),
+                this._cyl(.045, .05, .014, this._mat('#6b5a45', { metalness: .7, roughness: .35 }), x, .874, z, 28),
+                this._cyl(.028, .028, .022, this._mat('#1a1a1a', { roughness: .5 }), x, .874, z, 20));
+          for (let k = 0; k < 5; k++){
+            const a = k * Math.PI * 2 / 5;
+            g.add(this._box(.07, .014, .012, this._mat('#1c1c1c', { roughness: .6 }), x + Math.cos(a) * .1, .874, z + Math.sin(a) * .1));
+          }
+          g.add(this._cyl(.02, .022, .018, this._mat('#222', { roughness: .5 }), x, .874, d / 2 - .04, 20));
+        });
+        g.add(this._rbox(w, .06, .5, sm, 0, 1.55, bz + .25, .01),
+              this._box(.3, .72, .26, sm, 0, 1.61, bz + .13));
+        const scr = this._box(w - .02, .3, .008, this._mat('#15181b', { roughness: .05, metalness: .5 }), 0, 1.58, bz + .38);
+        scr.rotation.x = -.9;
+        g.add(scr, this._box(.16, .012, .003, this._mat('#101214', { emissive: '#6fd0ff', emissiveIntensity: .6, roughness: .5 }), 0, 1.575, bz + .502));
+        break;
+      }
+      case 'ksink': {
+        const st = this._mat('#c7ccd1', { metalness: .85, roughness: .28 });
+        const inner = this._mat('#9aa1a8', { metalness: .8, roughness: .35 });
+        const two = w >= .75, bw = two ? w * .42 : w * .7, bd = d * .66;
+        g.add(this._box(w, .008, d, st, 0, .862, 0));
+        (two ? [-w*.23, w*.23] : [0]).forEach(x => g.add(
+          this._shell(bw, bd, .02, .015, .04, st, x, .862, .03),
+          this._box(bw - .03, .002, bd - .03, inner, x, .87, .03),
+          this._cyl(.03, .03, .003, chrome(), x, .872, .03, 20)));
+        const fx = two ? 0 : w * .3, cm = chrome();
+        g.add(this._cyl(.025, .028, .03, cm, fx, .87, bz + .06, 20),
+              this._tube([[fx, .9, bz + .06], [fx, 1.12, bz + .06], [fx, 1.17, bz + .1], [fx, 1.14, bz + .18], [fx, 1.08, bz + .2]], .012, cm));
+        break;
+      }
+      case 'fridge': {
+        const fm = this._mat(color, { metalness: .45, roughness: .28 }), h = 1.8, fz = d / 2 - .05;
+        g.add(this._box(w - .02, .06, d - .06, this._mat('#2a2c2e', { roughness: .5 }), 0, 0, -.03),
+              this._rbox(w, h - .06, d - .05, fm, 0, .06, -.025, .02),
+              this._box(w - .01, h - .07, .003, this._mat('#2a2c2e', { roughness: .5 }), 0, .065, fz + .0015));
+        if (w > .85){
+          [-1, 1].forEach(s => {
+            g.add(this._rbox(w / 2 - .004, h - .08, .04, fm, s * w / 4, .07, fz + .023, .012));
+            this._pull(g, .8, true, s * .035, 1.05, fz + .043);
+          });
+          g.add(this._box(.1, .14, .003, screenMat('#2a6f8f'), -w / 4, 1.25, fz + .044));
+        } else {
+          g.add(this._rbox(w - .006, 1.06, .04, fm, 0, .72, fz + .023, .012),
+                this._rbox(w - .006, .64, .04, fm, 0, .07, fz + .023, .012));
+          this._pull(g, .5, true, -w / 2 + .06, 1.05, fz + .043);
+          this._pull(g, w * .5, false, 0, .64, fz + .043);
+          g.add(this._box(.08, .1, .003, screenMat('#2a6f8f'), w * .22, 1.4, fz + .044));
+        }
+        break;
+      }
+      case 'cabinet': case 'shoecab': {
+        const cm = this._mat(color, { roughness: .55 }), fz = d / 2 - .02;
+        if (type === 'shoecab'){
+          const h = 1.0, y0 = .16, n = Math.max(1, Math.round(w / .45));
+          g.add(this._box(w, h - y0, d - .02, cm, 0, y0, -.01),
+                this._box(w - .04, .01, .03, glowMat('#fff7e6', '#ffe9c4', .8), 0, y0 - .01, fz - .06));
+          this._fronts(g, -w / 2, y0, w, h - y0, fz, n, 1, cm, 'edge');
+          g.add(this._rbox(w + .01, .025, d, woodM(darken(color, .8)), 0, h, 0, .006),
+                this._rbox(.22, .015, .14, woodM('#6b543f'), -w * .25, h + .025, 0, .006));
+          this._vase(g, w * .28, h + .025, -.03, .05, .2, '#d8cfc2', R);
+        } else {
+          const h = .85, n = Math.max(1, Math.round(w / .5));
+          this._legs(g, w, d, .1, woodM('#3a3027'), .05, .016);
+          g.add(this._box(w, h - .13, d - .02, cm, 0, .1, -.01));
+          this._fronts(g, -w / 2, .62, w, .2, fz, n, 1, cm, 'bar');
+          this._fronts(g, -w / 2, .1, w, .52, fz, n, 1, cm, 'bar', .52);
+          g.add(this._rbox(w + .02, .03, d + .01, woodM(darken(color, .78)), 0, h - .03, 0, .008));
+          this._vase(g, w * .3, h, 0, .07, .24, '#e9e2d6', R);
+        }
+        break;
+      }
+      case 'island': {
+        const cm = this._mat(color, { roughness: .45 }), stone = this._mat('#dcd7cf', { roughness: .2 });
+        const cd = d - .3, n = Math.max(1, Math.round((w - .1) / .6));
+        const cab = new THREE.Group(), fz = cd / 2 - .03;
+        cab.add(this._box(w - .12, .1, cd - .08, this._mat('#4a4641', { roughness: .7 }), 0, 0, -.04),
+                this._box(w - .1, .74, cd - .03, cm, 0, .1, -.015));
+        this._fronts(cab, -w / 2 + .05, .64, w - .1, .2, fz, n, 1, cm, 'bar');
+        this._fronts(cab, -w / 2 + .05, .1, w - .1, .54, fz, n, 1, cm, 'bar', .56);
+        cab.rotation.y = Math.PI; cab.position.z = bz + cd / 2; g.add(cab);
+        g.add(this._rbox(w, .05, d, stone, 0, .84, 0, .006));
+        [-1, 1].forEach(s => g.add(this._box(.04, .84, d, stone, s * (w / 2 - .02), 0, 0)));
+        g.add(this._lathe([[0, 0], [.06, 0], [.14, .06], [.15, .07]],
+          this._mat('#6b543f', { roughness: .5, side: THREE.DoubleSide }), w * .22, .89, 0, 32));
+        for (let k = 0; k < 4; k++)
+          g.add(this._blob(.04, .04, .04, this._mat(['#d98c4a', '#9fbf5a', '#b5463a', '#e6c14f'][k], { roughness: .8 }),
+            w * .22 + Math.cos(k * 1.6) * .05, .935 + (k === 3 ? .04 : 0), Math.sin(k * 1.6) * .05, 14));
+        this._vase(g, -w * .25, .89, -.05, .05, .22, '#e9e2d6', R);
+        break;
+      }
+      case 'barstool': {
+        const r = Math.min(w, d) / 2, bm = blackMetal(), sy = .7;
+        [[1,1],[1,-1],[-1,1],[-1,-1]].forEach(([a, b]) =>
+          g.add(this._rod([a * r * .72, 0, b * r * .72], [a * r * .4, sy, b * r * .4], .011, bm)));
+        g.add(this._ring(Math.SQRT2 * r * (.72 - .32 * .4), .008, bm, 0, .28, 0),
+              this._cyl(r * .55, r * .55, .02, bm, 0, sy - .01, 0, 32),
+              this._lathe([[0, 0], [r * .85, 0], [r * .95, .02], [r * .97, .045], [r * .9, .07], [0, .075]], this._mat(color, { roughness: .6 }), 0, sy, 0, 40));
+        break;
+      }
+
+      /* ---------- 卫浴 ---------- */
+      case 'toilet': {
+        const cer = ceramic(), Rb = w * .45, zc = bz + d * .62, kz = (d * .37) / Rb, cm = chrome();
+        g.add(this._rbox(w * .88, .4, d * .24, cer, 0, .36, bz + d * .12, .04),
+              this._rbox(w * .92, .03, d * .27, cer, 0, .76, bz + d * .135, .012),
+              this._cyl(.022, .022, .006, cm, 0, .79, bz + d * .135, 20));
+        const ped = this._lathe([[0, 0], [Rb * .62, 0], [Rb * .66, .02], [Rb * .56, .12], [Rb * .62, .22], [Rb * .92, .33], [Rb, .37]], cer, 0, 0, zc, 40);
+        const seat = this._cyl(Rb * 1.01, Rb * 1.01, .022, this._mat('#f4f4f2', { roughness: .2 }), 0, .37, zc, 40);
+        const lid = this._cyl(Rb * .97, Rb * .99, .02, this._mat('#f4f4f2', { roughness: .2 }), 0, .392, zc, 40);
+        ped.scale.z = seat.scale.z = lid.scale.z = kz;
+        g.add(ped, seat, lid);
+        [-1, 1].forEach(s => g.add(this._box(.03, .02, .03, cm, s * w * .18, .39, zc - Rb * kz - .005)));
+        break;
+      }
+      case 'vanity': {
+        const vm = this._mat(color, { roughness: .5 }), stone = this._mat('#fafafa', { roughness: .18 });
+        const nb = w >= 1.1 ? 2 : 1, cd = d - .04, cm = chrome();
+        g.add(this._rbox(w, .45, cd, vm, 0, .33, bz + cd / 2, .008));
+        this._fronts(g, -w / 2 + .005, .335, w - .01, .44, d / 2 - .04, nb, 2, vm, 'edge');
+        g.add(this._rbox(w, .03, d, stone, 0, .78, 0, .006));
+        const rb = Math.min(.19, w / nb * .36);
+        for (let i = 0; i < nb; i++){
+          const x = nb === 1 ? 0 : (i ? w / 4 : -w / 4);
+          g.add(this._lathe([[0, 0], [rb * .55, 0], [rb * .85, .03], [rb, .1], [rb * .97, .12]], ceramic({ side: THREE.DoubleSide }), x, .81, .03, 40),
+                this._cyl(.018, .018, .003, cm, x, .812, .03, 16),
+                this._cyl(.02, .022, .02, cm, x, .81, bz + .06, 16),
+                this._tube([[x, .83, bz + .06], [x, 1.03, bz + .06], [x, 1.07, bz + .11], [x, 1.03, bz + .15]], .01, cm));
+        }
+        const mw = Math.min(w * .9, nb * .7);
+        g.add(this._rbox(mw + .02, .82, .02, glowMat('#fff7e6', '#ffe9c4', .9), 0, 1.14, bz + .01, .01),
+              this._box(mw, .8, .01, mirror(), 0, 1.15, bz + .025),
+              this._cyl(.028, .028, .12, this._mat('#c8b8a6', { roughness: .3 }), w / 2 - .08, .81, bz + .1, 16),
+              this._rbox(.18, .03, .12, fabric('#e9e2d6'), -w / 2 + .12, .81, .05, .012));
+        break;
+      }
+      case 'shower': {
+        const cm = chrome(), x = -w / 4;
+        g.add(this._rbox(w, .05, d, this._mat('#f4f4f2', { roughness: .3 }), 0, 0, 0, .01),
+              this._box(w * .6, .003, .05, this._mat('#9aa1a8', { metalness: .8, roughness: .3 }), 0, .05, bz + .08));
+        [[w, .01, 0, d / 2 - .005], [.01, d, w / 2 - .005, 0]].forEach(([gw, gd, px, pz]) => {
+          const p = this._box(gw, 1.95, gd, this.glassMat, px, .05, pz); p.castShadow = false; g.add(p);
+        });
+        g.add(this._box(.02, 1.95, .02, this.frameMat, w / 2 - .01, .05, d / 2 - .01),
+              this._box(.02, 1.95, .03, this.frameMat, -w / 2 + .01, .05, d / 2 - .005),
+              this._box(.03, 1.95, .02, this.frameMat, w / 2 - .005, .05, bz + .01),
+              this._box(w, .015, .02, this.frameMat, 0, 1.985, d / 2 - .005),
+              this._box(.02, .015, d, this.frameMat, w / 2 - .005, 1.985, 0),
+              this._rbox(.14, .1, .04, cm, x, 1.0, bz + .02, .01),
+              this._rod([x, 1.1, bz + .03], [x, 1.95, bz + .03], .012, cm),
+              this._tube([[x, 1.95, bz + .03], [x, 2.02, bz + .06], [x, 2.03, bz + .22]], .01, cm),
+              this._rbox(.24, .012, .24, cm, x, 2.02, bz + .25, .004));
+        g.add(this._box(.26, .012, .1, ceramic(), w / 2 - .2, 1.2, bz + .05));
+        break;
+      }
+      case 'bathtub': {
+        const cer = ceramic(), h = .56, t = .07, cm = chrome();
+        g.add(this._shell(w, d, h, t, .14, cer),
+              this._box(w - .1, .12, d - .1, cer, 0, 0, 0),
+              this._box(w - 2 * t + .004, .004, d - 2 * t + .004, this._mat('#bfe0ea', { roughness: .03, transparent: true, opacity: .6 }), 0, .4, 0));
+        const fx = w / 2 - t / 2;
+        g.add(this._tube([[fx, h - .02, 0], [fx, h + .1, 0], [fx - .06, h + .13, 0], [fx - .13, h + .09, 0]], .014, cm));
+        [-1, 1].forEach(s => g.add(this._cyl(.02, .02, .04, cm, fx, h, s * .1, 16)));
+        break;
+      }
+      case 'washer': case 'dryer': {
+        const bm = this._mat(color, { roughness: .35 });
+        const R0 = Math.min(w, d) * .25, fz = d / 2 - .02;
+        g.add(this._box(w - .02, .04, d - .04, this._mat('#8f969b', { roughness: .5 }), 0, 0, -.02),
+              this._rbox(w, .81, d - .02, bm, 0, .04, -.01, .025),
+              this._box(w - .04, .1, .006, this._mat(lighten(color, .3), { roughness: .4 }), 0, .72, fz + .003),
+              this._rbox(.18, .07, .01, bm, -w / 2 + .12, .735, fz + .006, .004),
+              this._box(.12, .035, .003, screenMat('#1f6f6a'), w * .14, .745, fz + .007));
+        const kn = this._cyl(.03, .03, .02, chrome(), -w * .02, .75, fz + .016, 28); kn.rotation.x = Math.PI / 2; g.add(kn);
+        const dr = new THREE.Mesh(new THREE.CircleGeometry(R0, 40), this._mat('#1b1f22', { roughness: .6 }));
+        dr.position.set(0, .4, fz + .004); g.add(dr);
+        const rg = this._mesh(new THREE.TorusGeometry(R0 + .02, .022, 14, 48), this._mat('#c7cfd5', { metalness: .7, roughness: .25 }));
+        rg.position.set(0, .4, fz + .016); g.add(rg);
+        const Rs = R0 * 1.42;
+        const cap = new THREE.Mesh(new THREE.SphereGeometry(Rs, 32, 12, 0, Math.PI * 2, 0, .78),
+          this._mat(type === 'dryer' ? '#4a4038' : '#26343d', { roughness: .04, metalness: .2, transparent: true, opacity: .8 }));
+        cap.rotation.x = Math.PI / 2;
+        cap.position.set(0, .4, fz + .012 - Rs * Math.cos(.78));
+        g.add(cap);
+        break;
+      }
+      case 'waterheater': {
+        const r = Math.min(d / 2, .23), L = w - .06, yc = 1.95, zc = bz + r + .02;
+        const tm = this._mat(color, { roughness: .35 }), cp = this._mat('#cfd4d8', { roughness: .4 });
+        const tank = this._mesh(new THREE.CylinderGeometry(r, r, L, 40), tm);
+        tank.rotation.z = Math.PI / 2; tank.position.set(0, yc, zc); g.add(tank);
+        [-1, 1].forEach(s => g.add(
+          this._blob(.035, r * .99, r * .99, cp, s * L / 2, yc, zc, 32),
+          this._box(.05, r * 1.1, .02, this._mat('#9a9ea3', { roughness: .5 }), s * L * .3, yc - r * .55, bz + .01)));
+        g.add(this._rbox(.2, .09, .02, this._mat('#e7eaec', { roughness: .4 }), L * .18, yc - .05, zc + r * .93, .008),
+              this._box(.07, .03, .002, screenMat('#2f8f7a'), L * .18 - .04, yc - .02, zc + r * .93 + .011));
+        break;
+      }
+
+      /* ---------- 家电 ---------- */
+      case 'tv': {
+        const th = w * .5625, yb = 1.2 - th / 2, z = bz + .03;
+        g.add(this._rbox(w * .6, th * .6, .03, this._mat('#222', { roughness: .5 }), 0, yb + th * .2, bz + .015, .01),
+              this._rbox(w, th, .025, this._mat('#18181a', { roughness: .4, metalness: .3 }), 0, yb, z + .01, .004),
+              this._box(w - .016, th - .022, .002, screenMat('#1f2b3a'), 0, yb + .014, z + .0235),
+              this._box(.04, .006, .002, this._mat('#8a8a8e', { roughness: .5 }), 0, yb + .004, z + .0235));
+        break;
+      }
+      case 'aircon': {
+        const am = this._mat(color, { roughness: .3 }), h = 1.8, fz = d / 2 - .005;
+        g.add(this._rbox(w, .06, d, this._mat('#cfd3d6', { roughness: .4 }), 0, 0, 0, .015),
+              this._rbox(w - .01, h - .06, d - .01, am, 0, .06, 0, .06),
+              this._rbox(w - .06, 1.0, .01, this._mat(lighten(color, .4), { roughness: .12 }), 0, .22, fz, .005),
+              this._box(w - .1, .42, .01, this._mat('#3d4145', { roughness: .5 }), 0, 1.28, fz));
+        for (let i = 0; i < 8; i++){
+          const b = this._box(w - .11, .012, .03, this._mat('#e4e7ea', { roughness: .4 }), 0, 1.3 + i * .05, fz + .008);
+          b.rotation.x = -.35; g.add(b);
+        }
+        g.add(this._box(.1, .035, .003, screenMat('#4fb3a5'), 0, 1.12, fz + .006));
+        break;
+      }
+      case 'acwall': {
+        const h = .3, am = this._mat(color, { roughness: .3 }), s = new THREE.Shape();
+        s.moveTo(0, .02); s.lineTo(0, h); s.lineTo(d * .75, h);
+        s.quadraticCurveTo(d, h, d, h * .55); s.quadraticCurveTo(d, 0, d * .55, 0);
+        s.lineTo(.02, 0); s.lineTo(0, .02);
+        const geo = new THREE.ExtrudeGeometry(s, { depth: w - .02, bevelEnabled: true, bevelThickness: .01, bevelSize: .006, bevelSegments: 3, curveSegments: 16 });
+        geo.rotateY(-Math.PI / 2); geo.translate((w - .02) / 2, 2.2, bz);
+        g.add(this._mesh(geo, am),
+              this._box(w - .12, .004, .07, this._mat('#3a3d40', { roughness: .5 }), 0, 2.19, bz + d * .55));
+        break;
+      }
+      case 'dishwasher': {
+        const dm = this._mat(color, { metalness: .55, roughness: .28 }), fz = d / 2 - .02;
+        g.add(this._box(w - .01, .08, d - .07, this._mat('#3a3834', { roughness: .6 }), 0, 0, -.035),
+              this._box(w - .005, .76, d - .03, this._mat('#8b9095', { roughness: .5 }), 0, .08, -.015),
+              this._rbox(w - .006, .7, .02, dm, 0, .085, fz, .004),
+              this._box(w - .006, .055, .02, this._mat('#26282a', { roughness: .4 }), 0, .785, fz));
+        for (let i = 0; i < 4; i++)
+          g.add(this._box(.012, .006, .002, this._mat('#101214', { emissive: i ? '#6fd0ff' : '#7fe08a', emissiveIntensity: .8, roughness: .5 }), w * .1 + i * .03, .81, fz + .011));
+        this._pull(g, w * .6, false, 0, .74, fz + .01);
+        break;
+      }
+      case 'ovencol': {
+        const cm = this._mat(color, { roughness: .5 }), h = 2.1, fz = d / 2 - .02;
+        const frm = this._mat('#1c1d1f', { roughness: .3, metalness: .5 }), gl = this._mat('#0b0c0d', { roughness: .03, metalness: .6 });
+        g.add(this._box(w - .02, .08, d - .06, this._mat('#4a4641', { roughness: .7 }), 0, 0, -.03),
+              this._box(w, h - .08, d - .02, cm, 0, .08, -.01));
+        this._fronts(g, -w / 2, .08, w, .6, fz, 1, 2, cm, 'bar');
+        this._fronts(g, -w / 2, 1.78, w, h - 1.8, fz, 1, 1, cm, 'bar', 1.84);
+        [[.7, .58], [1.3, .46]].forEach(([y, ah]) => {
+          g.add(this._box(w - .02, ah - .01, .02, frm, 0, y, fz + .01),
+                this._box(w - .1, ah * .52, .003, gl, 0, y + ah * .1, fz + .021),
+                this._box(w - .04, .06, .003, this._mat('#2a2c2e', { roughness: .5 }), 0, y + ah - .075, fz + .021),
+                this._box(.08, .022, .002, this._mat('#101214', { emissive: '#ff9a3c', emissiveIntensity: .7, roughness: .5 }), 0, y + ah - .056, fz + .023));
+          this._pull(g, w * .7, false, 0, y + ah * .72, fz + .02);
+        });
+        break;
+      }
+      case 'purifier': {
+        const pm = this._mat(color, { roughness: .45 }), h = .72;
+        g.add(this._rbox(w, h, d, pm, 0, 0, 0, Math.min(w, d) * .2),
+              this._rbox(w - .05, .006, d - .05, this._mat('#8d959b', { roughness: .4 }), 0, h - .002, 0, .02));
+        for (let i = 0; i < 7; i++)
+          g.add(this._box(w - .07, .004, .006, this._mat('#6f777d', { roughness: .6 }), 0, h + .002, -d / 2 + .05 + i * (d - .1) / 6));
+        g.add(this._rbox(w - .06, .42, .006, fabric('#c8ccd0'), 0, .06, d / 2 - .001, .01));
+        const rg = this._mesh(new THREE.TorusGeometry(.03, .004, 8, 32), this._mat('#101214', { emissive: '#4fb3a5', emissiveIntensity: .8, roughness: .5 }));
+        rg.position.set(0, .6, d / 2 + .002); g.add(rg);
+        break;
+      }
+
+      /* ---------- 书房 · 休闲 ---------- */
+      case 'officechair': {
+        const r = Math.min(w, d) * .46, dk = darken(color, .75), bm = this._mat('#2b2b2d', { roughness: .45 }), cm = chrome();
+        for (let k = 0; k < 5; k++){
+          const a = k * Math.PI * 2 / 5, tx = Math.sin(a) * r * .95, tz = Math.cos(a) * r * .95;
+          g.add(this._rod([0, .1, 0], [tx, .07, tz], .022, bm, .014, 10),
+                this._cyl(.008, .008, .03, bm, tx, .04, tz, 8));
+        }
+        g.add(this._cyl(.05, .06, .05, bm, 0, .08, 0, 20),
+              this._cyl(.025, .025, .22, cm, 0, .12, 0, 16),
+              this._cyl(.036, .036, .12, bm, 0, .12, 0, 16),
+              this._rbox(.22, .05, .22, bm, 0, .34, .02, .01),
+              this._rbox(w * .78, .03, d * .72, bm, 0, .38, .04, .01),
+              this._rbox(w * .8, .08, d * .74, fabric(color), 0, .4, .05, .035),
+              this._tube([[0, .36, 0], [0, .38, bz + .12], [0, .6, bz + .07]], .02, bm));
+        const bf = this._shell(w * .72, .6, .03, .025, .08, bm);
+        bf.rotation.x = Math.PI / 2 - .12; bf.position.set(0, .88, bz + .06); g.add(bf);
+        const bk = this._box(w * .68, .56, .006, this._mat(dk, { roughness: .85, transparent: true, opacity: .88, side: THREE.DoubleSide }), 0, .6, bz + .085);
+        bk.rotation.x = -.12;
+        const bl = this._rbox(w * .5, .08, .03, fabric(color), 0, .66, bz + .11, .015); bl.rotation.x = -.12;
+        g.add(bk, bl,
+              this._rod([-.05, 1.14, bz + .025], [-.05, 1.22, bz + .015], .008, bm),
+              this._rod([.05, 1.14, bz + .025], [.05, 1.22, bz + .015], .008, bm),
+              this._rbox(w * .45, .12, .05, fabric(dk), 0, 1.2, bz + .02, .025));
+        [-1, 1].forEach(s => g.add(this._box(.035, .22, .035, bm, s * w * .4, .42, .04),
+                                    this._rbox(.07, .03, d * .4, bm, s * w * .4, .63, .04, .012)));
+        break;
+      }
+      case 'piano': {
+        const pk = this._mat(color, { roughness: .12, metalness: .1 });
+        const bd = d * .5, kz = bz + bd, h = 1.25, kd = d * .22 - .03;
+        const iv = this._mat('#faf8f3', { roughness: .3 }), eb = this._mat('#111', { roughness: .25 }), kw = (w - .12) / 52;
+        g.add(this._box(w, h, bd, pk, 0, 0, bz + bd / 2),
+              this._rbox(w + .02, .03, bd + .03, pk, 0, h, bz + bd / 2 + .01, .008));
+        [-1, 1].forEach(s => g.add(this._rbox(.06, .13, kd + .06, pk, s * (w / 2 - .03), .6, kz + (kd + .06) / 2, .01),
+                                    this._box(.05, .6, .05, pk, s * (w / 2 - .08), 0, kz + kd + .01),
+                                    this._box(.06, .04, d - bd, pk, s * (w / 2 - .08), 0, kz + (d - bd) / 2)));
+        g.add(this._box(w - .12, .08, kd + .05, pk, 0, .6, kz + (kd + .05) / 2),
+              this._box(w - .12, .1, .03, pk, 0, .68, kz + .015));
+        for (let i = 0; i < 52; i++){
+          const x = -w / 2 + .06 + kw * (i + .5);
+          g.add(this._box(kw - .0015, .022, kd, iv, x, .68, kz + .03 + kd / 2));
+          if (i < 51 && 'ACDFG'.includes('ABCDEFG'[i % 7]))
+            g.add(this._box(kw * .58, .02, kd * .62, eb, x + kw / 2, .7, kz + .03 + kd * .31));
+        }
+        const mk = this._box(w * .42, .18, .012, pk, 0, .84, kz + .012); mk.rotation.x = -.25;
+        g.add(mk);
+        break;
+      }
+      case 'treadmill': {
+        const tm = this._mat(color, { roughness: .55 }), bm = this._mat('#2a2a2c', { roughness: .5 });
+        const al = this._mat('#9a9ea3', { metalness: .6, roughness: .4 });
+        g.add(this._rbox(w, .14, d - .25, tm, 0, .03, .125, .03),
+              this._box(w - .16, .006, d - .5, this._mat('#141414', { roughness: .7 }), 0, .17, .15));
+        [-1, 1].forEach(s => g.add(this._box(.07, .008, d - .45, al, s * (w / 2 - .05), .17, .15)));
+        [bz + .06, d / 2 - .06].forEach(z => [-1, 1].forEach(s =>
+          g.add(this._box(.06, .03, .06, bm, s * (w / 2 - .06), 0, z))));
+        g.add(this._rbox(w, .22, .32, tm, 0, 0, bz + .16, .05));
+        [-1, 1].forEach(s => g.add(
+          this._rod([s * (w / 2 - .06), .15, bz + .2], [s * (w / 2 - .06), 1.15, bz + .3], .025, bm, .022),
+          this._tube([[s * (w / 2 - .06), 1.0, bz + .28], [s * (w / 2 - .06), 1.0, bz + .5], [s * (w / 2 - .07), .97, bz + .62]], .018, bm)));
+        const cg = new THREE.Group(); cg.position.set(0, 1.2, bz + .31); cg.rotation.x = -.5;
+        cg.add(this._rbox(w * .8, .2, .08, bm, 0, -.1, 0, .02),
+               this._box(w * .4, .11, .004, screenMat('#2a5d8f'), 0, -.055, .041));
+        g.add(cg);
+        break;
+      }
+
+      default: g.add(this._box(w, .8, d, M));
+    }
+    return g;
+  }
+
+  /* ============================================================
+   *  初始化
+   * ============================================================ */
   async init(){
     if (this.inited) return;
     this.inited = true;
@@ -55,11 +1022,13 @@ export class Scene3D {
     this.stage = stage;
     this.host = host;
 
-    const renderer = this.renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+    const renderer = this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     renderer.setSize(this.SW(), this.SH());
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.05;
     host.prepend(renderer.domElement);
 
     const scene = this.scene = new THREE.Scene();
@@ -67,63 +1036,57 @@ export class Scene3D {
     const camera = this.camera = new THREE.PerspectiveCamera(FOV, this.SW() / this.SH(), .05, 300);
 
     const orbit = this.orbit = new OrbitControls(camera, renderer.domElement);
-    orbit.enableDamping = true;
-    orbit.dampingFactor = 0.08;
-    orbit.maxPolarAngle = Math.PI * .495;
-    orbit.minDistance = 1.5;
-    orbit.maxDistance = 45;
+    orbit.enableDamping = true; orbit.dampingFactor = 0.08;
+    orbit.maxPolarAngle = Math.PI * .495; orbit.minDistance = 1.5; orbit.maxDistance = 45;
 
     const hemi = this.hemi = new THREE.HemisphereLight(0xfff8ee, 0xb9a88f, 1.1);
     const sun = this.sun = new THREE.DirectionalLight(0xfff1dd, 2.6);
     sun.castShadow = true;
     sun.shadow.mapSize.setScalar(COARSE ? 1024 : 2048);
-    Object.assign(sun.shadow.camera, { left:-11, right:11, top:11, bottom:-11, near:1, far:60 });
-    sun.shadow.bias = -0.0004;
-    sun.shadow.normalBias = 0.02;
+    Object.assign(sun.shadow.camera, { left: -11, right: 11, top: 11, bottom: -11, near: 1, far: 60 });
+    sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.02;
     sun.target.position.set(0, 0, 0);
     scene.add(sun.target);
 
     const ground = this.ground = new THREE.Mesh(
       new THREE.PlaneGeometry(160, 160),
-      new THREE.MeshStandardMaterial({ color:0xf2eee7, roughness:1 })
-    );
+      new THREE.MeshStandardMaterial({ color: 0xf2eee7, roughness: 1 }));
     ground.rotation.x = -Math.PI / 2;
     ground.position.y = -0.015;
     ground.receiveShadow = true;
-
     scene.add(hemi, sun, ground);
 
-    this.wallMat  = new THREE.MeshStandardMaterial({ color:'#f4f1eb', roughness:.92 });
-    this.capMat   = new THREE.MeshStandardMaterial({ color:'#34312d', roughness:.9 });
+    this.wallMat  = this._mat('#f4f1eb', { roughness: .92 });
+    this.capMat   = this._mat('#34312d', { roughness: .9 });
+    this.frameMat = this._mat('#5d6166', { roughness: .5, metalness: .4 });
     this.glassMat = new THREE.MeshPhysicalMaterial({
-      color:0xcfe6ef, roughness:.05, transparent:true, opacity:.28,
-      depthWrite:false, side:THREE.DoubleSide,
+      color: 0xcfe6ef, roughness: .05, transparent: true, opacity: .28,
+      depthWrite: false, side: THREE.DoubleSide,
     });
 
     this.archFloor = new THREE.Group();
     this.archUp    = new THREE.Group();
     this.furnG     = new THREE.Group();
-    scene.add(this.archFloor, this.archUp, this.furnG);
+    this.lampG     = new THREE.Group();
+    this.ceilingG  = new THREE.Group();          // 只投阴影、不渲染颜色（视角仍可穿透）
+    this.ceilMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, colorWrite: false, depthWrite: false, side: THREE.DoubleSide,
+    });
+    scene.add(this.archFloor, this.archUp, this.furnG, this.lampG, this.ceilingG);
 
     /* ---- 点击门开合 ---- */
     let downAt = null;
     const cv = renderer.domElement;
-    cv.addEventListener('pointerdown', e => {
-      downAt = { x:e.clientX, y:e.clientY, t:performance.now() };
-    });
+    cv.addEventListener('pointerdown', e => { downAt = { x: e.clientX, y: e.clientY, t: performance.now() }; });
     cv.addEventListener('pointerup', e => {
       if (!downAt) return;
       const dt = performance.now() - downAt.t;
       const dist = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y);
       downAt = null;
-      // 只把「短按 + 未拖动」当作点击（避免和 OrbitControls 冲突）
       if (dt > 400 || dist > 5) return;
-      if (this.walk) return;      // 漫游模式：开门交给 E 键
+      if (this.walk) return;
       const h = this._pick(e);
-      // 只对门做开合切换；距离不再做硬阈值限制（用户可能站得很远）
-      if (h?.door){
-        h.door.open = !h.door.open;
-      }
+      if (h?.door){ h.door.open = !h.door.open; }
     });
 
     new ResizeObserver(() => {
@@ -137,11 +1100,8 @@ export class Scene3D {
     this._bindWalkEvents();
   }
 
-  /* ---------- 漫游事件绑定（键盘 / 鼠标 / 触屏 / 指针锁定） ---------- */
   _bindWalkEvents(){
     const cv = this.renderer.domElement;
-
-    /* --- 键盘：WASD 移动、Shift 快走、E 开门、Esc 退出 --- */
     document.addEventListener('keydown', e => {
       const k = e.key.toLowerCase();
       this.keys[k] = true;
@@ -154,16 +1114,11 @@ export class Scene3D {
       this.keys[e.key.toLowerCase()] = false;
       if (!e.shiftKey) this.keys['shift'] = false;
     });
-
-    /* --- 指针锁定：进入漫游后请求，锁定后鼠标直接转向 --- */
     document.addEventListener('pointerlockchange', () => {
       if (!this.walk) return;
       const locked = document.pointerLockElement === cv;
       this.walk.locked = locked;
-      if (!locked){
-        // 用户按 Esc 退出指针锁定 → 同时退出漫游
-        this.exitWalk();
-      }
+      if (!locked) this.exitWalk();
     });
     document.addEventListener('mousemove', e => {
       if (!this.walk || !this.walk.locked) return;
@@ -174,11 +1129,9 @@ export class Scene3D {
       this._applyWalkCam();
     });
 
-    /* --- 回退：未锁定指针时按住左键拖动转向 --- */
     let drag = null;
     cv.addEventListener('mousedown', e => {
-      if (!this.walk || this.walk.locked) return;
-      if (e.button !== 0) return;
+      if (!this.walk || this.walk.locked || e.button !== 0) return;
       drag = { x: e.clientX, y: e.clientY };
     });
     document.addEventListener('mousemove', e => {
@@ -193,7 +1146,6 @@ export class Scene3D {
     });
     document.addEventListener('mouseup', () => { drag = null; });
 
-    /* --- 触屏：摇杆移动 + 画布拖动转向 --- */
     const joy = document.getElementById('joy');
     if (joy){
       let joyId = null, cx = 0, cy = 0;
@@ -219,15 +1171,10 @@ export class Scene3D {
         apply(e);
         e.preventDefault();
       });
-      joy.addEventListener('pointermove', e => {
-        if (e.pointerId !== joyId) return;
-        apply(e);
-        e.preventDefault();
-      });
+      joy.addEventListener('pointermove', e => { if (e.pointerId === joyId){ apply(e); e.preventDefault(); } });
       const jEnd = e => {
         if (e.pointerId !== joyId) return;
-        joyId = null;
-        this._joy = null;
+        joyId = null; this._joy = null;
         const knob = joy.querySelector('i');
         if (knob) knob.style.transform = '';
       };
@@ -250,12 +1197,9 @@ export class Scene3D {
       this.walk.pitch = Math.max(-lim, Math.min(lim, this.walk.pitch));
       this._applyWalkCam();
     });
-    cv.addEventListener('pointerup', e => {
-      if (touchLook && e.pointerId === touchLook.id) touchLook = null;
-    });
+    cv.addEventListener('pointerup', e => { if (touchLook && e.pointerId === touchLook.id) touchLook = null; });
     cv.addEventListener('pointercancel', () => { touchLook = null; });
 
-    /* --- 滚轮调焦（漫游模式下，仅调整本机 FOV，不影响鸟瞰） --- */
     cv.addEventListener('wheel', e => {
       if (!this.walk) return;
       e.preventDefault();
@@ -266,33 +1210,27 @@ export class Scene3D {
       this.camera.updateProjectionMatrix();
     }, { passive: false });
 
-    /* --- 退出按钮 --- */
     const exit = document.getElementById('walkExit');
     if (exit) exit.addEventListener('click', () => this.exitWalk());
   }
 
-  /* ---------- 清理 ---------- */
-  _clear(g){
-    g.traverse(o => { if (o.geometry) o.geometry.dispose(); });
-    g.clear();
-  }
+  /* ============================================================
+   *  墙 / 建筑
+   * ============================================================ */
+  _clear(g){ g.traverse(o => { if (o.geometry) o.geometry.dispose(); }); g.clear(); }
 
-  /* ---------- 墙段生成（支持中心线格式 + 数组格式） ---------- */
   _wallBox(w, yb, yt, mat){
     if (yt - yb <= .001) return;
     let cx, cy, L, T, rotY = 0;
     if (Array.isArray(w)){
       const [x0, y0, x1, y1] = w;
-      L = this.M(x1 - x0);
-      T = this.M(y1 - y0);
-      cx = (x0 + x1) / 2;
-      cy = (y0 + y1) / 2;
+      L = this.M(x1 - x0); T = this.M(y1 - y0);
+      cx = (x0 + x1) / 2; cy = (y0 + y1) / 2;
     } else {
       const dx = w.x1 - w.x0, dy = w.y1 - w.y0;
       L = Math.max(0.001, Math.hypot(dx, dy) / 1000);
       T = Math.max(0.02, (w.t || 240) / 1000);
-      cx = (w.x0 + w.x1) / 2;
-      cy = (w.y0 + w.y1) / 2;
+      cx = (w.x0 + w.x1) / 2; cy = (w.y0 + w.y1) / 2;
       rotY = -Math.atan2(dy, dx);
     }
     const h = yt - yb;
@@ -305,118 +1243,45 @@ export class Scene3D {
     this.archUp.add(o);
   }
 
-  /**
-   * 生成一条墙的所有几何，按它上面的门窗洞口分段。
-   * @param wall      墙对象 { id, x0, y0, x1, y1, t, kind }
-   * @param openings  该墙上的洞口列表 [{ kind:'door'|'window', x0,y0,x1,y1, sill }]
-   * @param top       墙的最大高度（this.opt.cut）
-   */
   _buildWallWithOpenings(wall, openings, top){
     const dx = wall.x1 - wall.x0, dy = wall.y1 - wall.y0;
     const wLen = Math.hypot(dx, dy);
     if (wLen < 1) return;
     const ux = dx / wLen, uy = dy / wLen;
-
-    // 把每个洞口转成沿墙方向的参数区间 + 上下高度
     const holes = [];
     openings.forEach(op => {
-      const t1 = this._projectT({ x:op.x0, y:op.y0 }, wall);
-      const t2 = this._projectT({ x:op.x1, y:op.y1 }, wall);
+      const t1 = this._projectT({ x: op.x0, y: op.y0 }, wall);
+      const t2 = this._projectT({ x: op.x1, y: op.y1 }, wall);
       const a = Math.min(t1, t2) * wLen;
       const b = Math.max(t1, t2) * wLen;
       if (b - a < 1) return;
       const isDoor = op.kind === 'door';
-      const isDem  = op.kind === 'demolition';
+      const isDem = op.kind === 'demolition';
       const sill = (isDoor || isDem) ? 0 : Math.max(0, (op.sill || 900) / 1000);
       const head = isDem ? top : (isDoor ? Math.min(2.05, top) : Math.min(2.4, top));
-      holes.push({
-        tMin: Math.max(0, a),
-        tMax: Math.min(wLen, b),
-        sill,
-        head,
-      });
+      holes.push({ tMin: Math.max(0, a), tMax: Math.min(wLen, b), sill, head });
     });
-
-    if (holes.length === 0){
-      this._wallBox(wall, 0, top);
-      return;
-    }
-
+    if (holes.length === 0){ this._wallBox(wall, 0, top); return; }
     const breaks = new Set([0, wLen]);
     holes.forEach(h => { breaks.add(h.tMin); breaks.add(h.tMax); });
     const sorted = [...breaks].sort((a, b) => a - b);
-
     for (let i = 0; i < sorted.length - 1; i++){
       const a = sorted[i], b = sorted[i + 1];
       if (b - a < 1) continue;
       const mid = (a + b) / 2;
-
       let hit = null;
-      for (const h of holes){
-        if (mid > h.tMin + 1e-6 && mid < h.tMax - 1e-6){ hit = h; break; }
-      }
-
+      for (const h of holes) if (mid > h.tMin + 1e-6 && mid < h.tMax - 1e-6){ hit = h; break; }
       const cx0 = wall.x0 + ux * a, cy0 = wall.y0 + uy * a;
       const cx1 = wall.x0 + ux * b, cy1 = wall.y0 + uy * b;
-      const segWall = { x0:cx0, y0:cy0, x1:cx1, y1:cy1, t:wall.t, kind:wall.kind };
-
-      if (!hit){
-        this._wallBox(segWall, 0, top);
-      } else {
+      const segWall = { x0: cx0, y0: cy0, x1: cx1, y1: cy1, t: wall.t, kind: wall.kind };
+      if (!hit) this._wallBox(segWall, 0, top);
+      else {
         if (hit.sill > 0.01) this._wallBox(segWall, 0, Math.min(hit.sill, top));
         if (hit.head < top - 0.01) this._wallBox(segWall, hit.head, top);
       }
     }
   }
 
-  /**
-   * 为落在墙缺口处的窗（凸窗 / 外飘窗 / 独立窗）补齐窗台墙（sill 以下）和窗楣墙（head 以上）。
-   * 判定规则：窗的几何沿其自身方向，被任一未拆除的墙覆盖超过 90% → 认为由该墙承载，
-   * 不补；否则视为独立窗，按窗的自身几何补上下墙段。
-   */
-  _ensureWindowWalls(plan, layout, top){
-    const walls = plan.walls || [];
-    const dem = layout.demolished || [];
-    const winWallMat = [
-      this.wallMat, this.wallMat, this.capMat,
-      this.wallMat, this.wallMat, this.wallMat,
-    ];
-
-    (plan.windows || []).forEach(win => {
-      if (!win || !Number.isFinite(+win.x0) || !Number.isFinite(+win.y0)
-        || !Number.isFinite(+win.x1) || !Number.isFinite(+win.y1)) return;
-      const winLen = Math.hypot(win.x1 - win.x0, win.y1 - win.y0);
-      if (winLen < 1) return;
-      const wcx = (win.x0 + win.x1) / 2;
-      const wcy = (win.y0 + win.y1) / 2;
-      const winT = win.t || 240;
-
-      /* 沿窗方向统计被墙覆盖的长度 */
-      let maxCover = 0;
-      for (const w of walls){
-        if (dem.includes(w.id)) continue;
-        // 距离窗中心必须足够近（考虑两倍厚度容差）
-        const d = this._distToSeg(wcx, wcy, w.x0, w.y0, w.x1, w.y1);
-        if (d > (w.t + winT) / 2 + 200) continue;
-        // 投影到墙中心线，计算重叠长度
-        const t1 = this._projectT({ x:win.x0, y:win.y0 }, w);
-        const t2 = this._projectT({ x:win.x1, y:win.y1 }, w);
-        const wallLen = Math.hypot(w.x1 - w.x0, w.y1 - w.y0) || 1;
-        const ovl = Math.abs(t2 - t1) * wallLen;
-        if (ovl > maxCover) maxCover = ovl;
-      }
-
-      /* 覆盖率 > 90% 认为由墙承载；否则补齐上下墙段 */
-      if (maxCover > winLen * 0.9) return;
-
-      const sill = (win.sill || 900) / 1000;
-      const head = Math.min(2.4, top);
-      if (sill > 0.01)   this._wallBox(win, 0, Math.min(sill, top), winWallMat);
-      if (head < top - 0.01) this._wallBox(win, head, top, winWallMat);
-    });
-  }
-
-  /** 点 p 在墙中心线上的参数 t ∈ [0,1] */
   _projectT(p, wall){
     const dx = wall.x1 - wall.x0, dy = wall.y1 - wall.y0;
     const L2 = dx * dx + dy * dy;
@@ -424,23 +1289,81 @@ export class Scene3D {
     const t = ((p.x - wall.x0) * dx + (p.y - wall.y0) * dy) / L2;
     return Math.max(0, Math.min(1, t));
   }
-
-  /** 点到线段的距离 */
   _distToSeg(px, py, x0, y0, x1, y1){
     const dx = x1 - x0, dy = y1 - y0, L2 = dx * dx + dy * dy;
     const t = L2 ? Math.max(0, Math.min(1, ((px - x0) * dx + (py - y0) * dy) / L2)) : 0;
     return Math.hypot(px - (x0 + t * dx), py - (y0 + t * dy));
   }
-
-  /** 找一条墙上的所有洞口（先按 hostWall，再按几何距离兜底） */
   _openingsOnWall(wall, plan){
     const tol = (wall.t || 240) / 2 + 500;
     const all = [...(plan.doors || []), ...(plan.windows || [])];
     return all.filter(op => {
       if (op.hostWall === wall.id) return true;
       const cx = (op.x0 + op.x1) / 2, cy = (op.y0 + op.y1) / 2;
-      const d = this._distToSeg(cx, cy, wall.x0, wall.y0, wall.x1, wall.y1);
-      return d < tol;
+      return this._distToSeg(cx, cy, wall.x0, wall.y0, wall.x1, wall.y1) < tol;
+    });
+  }
+
+  /** 补充：落在墙缺口处的独立窗，需要主动补上窗台墙 + 窗楣墙 */
+  _ensureWindowWalls(plan, layout, top){
+    const walls = plan.walls || [];
+    const dem = layout.demolished || [];
+    const winWallMat = [this.wallMat, this.wallMat, this.capMat, this.wallMat, this.wallMat, this.wallMat];
+    (plan.windows || []).forEach(win => {
+      if (!win || !Number.isFinite(+win.x0) || !Number.isFinite(+win.y0)
+        || !Number.isFinite(+win.x1) || !Number.isFinite(+win.y1)) return;
+      const winLen = Math.hypot(win.x1 - win.x0, win.y1 - win.y0);
+      if (winLen < 1) return;
+      const wcx = (win.x0 + win.x1) / 2, wcy = (win.y0 + win.y1) / 2;
+      const winT = win.t || 240;
+      let maxCover = 0;
+      for (const w of walls){
+        if (dem.includes(w.id)) continue;
+        const d = this._distToSeg(wcx, wcy, w.x0, w.y0, w.x1, w.y1);
+        if (d > (w.t + winT) / 2 + 200) continue;
+        const t1 = this._projectT({ x: win.x0, y: win.y0 }, w);
+        const t2 = this._projectT({ x: win.x1, y: win.y1 }, w);
+        const wallLen = Math.hypot(w.x1 - w.x0, w.y1 - w.y0) || 1;
+        const ovl = Math.abs(t2 - t1) * wallLen;
+        if (ovl > maxCover) maxCover = ovl;
+      }
+      if (maxCover > winLen * 0.9) return;
+      const sill = (win.sill || 900) / 1000;
+      const head = Math.min(2.4, top);
+      if (sill > 0.01) this._wallBox(win, 0, Math.min(sill, top), winWallMat);
+      if (head < top - 0.01) this._wallBox(win, head, top, winWallMat);
+    });
+  }
+
+  /**
+   * 缺口处的门：补一段从门顶到顶面的过梁墙。
+   * 判定：门沿其自身方向，被任一未拆除的墙覆盖超过 90% → 认为该门在墙中间（由
+   * _buildWallWithOpenings 打洞处理），跳过；否则认为门在墙缺口处，需要补门头。
+   */
+  _ensureDoorWalls(plan, layout, top){
+    const walls = plan.walls || [];
+    const dem = layout.demolished || [];
+    const doorTop = Math.min(2.05, top);
+    if (top <= doorTop + .01) return;
+    const mat = [this.wallMat, this.wallMat, this.capMat, this.wallMat, this.wallMat, this.wallMat];
+    (plan.doors || []).forEach(d => {
+      const len = Math.hypot(d.x1 - d.x0, d.y1 - d.y0);
+      if (len < 1) return;
+      const dcx = (d.x0 + d.x1) / 2, dcy = (d.y0 + d.y1) / 2;
+      const dT = d.t || 240;
+      let maxCover = 0;
+      for (const w of walls){
+        if (dem.includes(w.id)) continue;
+        const dist = this._distToSeg(dcx, dcy, w.x0, w.y0, w.x1, w.y1);
+        if (dist > (w.t + dT) / 2 + 200) continue;
+        const t1 = this._projectT({ x: d.x0, y: d.y0 }, w);
+        const t2 = this._projectT({ x: d.x1, y: d.y1 }, w);
+        const wLen = Math.hypot(w.x1 - w.x0, w.y1 - w.y0) || 1;
+        const ovl = Math.abs(t2 - t1) * wLen;
+        if (ovl > maxCover) maxCover = ovl;
+      }
+      if (maxCover > len * 0.9) return;
+      this._wallBox(d, doorTop, top, mat);
     });
   }
 
@@ -454,19 +1377,58 @@ export class Scene3D {
   buildArch(){
     this._clear(this.archFloor);
     this._clear(this.archUp);
+    this._clear(this.lampG);
+    this._clear(this.ceilingG);
+    this.lamps = [];
     const { plan, layout } = this.app.store.state;
     const top = this.opt.cut;
 
-    /* 地板 */
+    /* 地板：按房间地面材料取纹理 */
     (plan.rooms || []).forEach(r => {
       if (!r.poly || !r.poly.length) return;
-      const geo = new THREE.ShapeGeometry(this._shapeOf(r.poly));
+      const matKey = r.mat || 'tile800';
+      const floorM = this._floorMat(matKey);
+      const bay = r.counted === false;
+      const geo = bay
+        ? new THREE.ExtrudeGeometry(this._shapeOf(r.poly), { depth: .45, bevelEnabled: false })
+        : new THREE.ShapeGeometry(this._shapeOf(r.poly));
       geo.rotateX(-Math.PI / 2);
-      const m = new THREE.MeshStandardMaterial({ color: 0xe9e3d6, roughness:.7 });
-      const fl = new THREE.Mesh(geo, m);
+      const fl = new THREE.Mesh(geo, bay ? [floorM, this._mat('#e9e4da', { roughness: .8 })] : floorM);
       fl.receiveShadow = true;
       fl.userData.room = r.id;
-      this.archFloor.add(fl);
+      if (bay){ fl.castShadow = true; this.archUp.add(fl); } else this.archFloor.add(fl);
+
+      /* 房顶 shadowOnly：遮挡阳光 → 室内靠窗口直射光 + 间接光；
+         但 colorWrite=false，所以视角依旧能"穿透"看到室内。 */
+      if (top >= H - .01 && r.counted !== false){
+        const cg = new THREE.ShapeGeometry(this._shapeOf(r.poly, true));
+        cg.rotateX(Math.PI / 2);
+        const ceil = new THREE.Mesh(cg, this.ceilMat);
+        ceil.position.y = H;
+        ceil.castShadow = true;
+        ceil.receiveShadow = false;
+        this.ceilingG.add(ceil);
+      }
+
+      /* 顶灯：房间几何中心，天花板下方 */
+      const lampCfg = r.lamp || {};
+      if (r.at && lampCfg.on !== false){
+        const lx = this.wx(r.at[0]), lz = this.wz(r.at[1]);
+        const color = lampCfg.color || '#ffd9a8';
+        const disc = new THREE.Mesh(
+          new THREE.CylinderGeometry(.18, .18, .02, 24),
+          this._mat('#fbfbf9', { emissive: new THREE.Color(color), emissiveIntensity: .25, roughness: .5 }));
+        disc.position.set(lx, H - .015, lz);
+        disc.userData.lamp = { roomId: r.id };
+        this.lampG.add(disc);
+        const pl = new THREE.PointLight(new THREE.Color(color), 0, 7, 1.6);
+        pl.position.set(lx, H - .25, lz);
+        const baseIntensity = Math.max(.2, Math.min(2, lampCfg.intensity ?? 1)) * 4;
+        pl.userData.baseIntensity = baseIntensity;
+        pl.userData.lamp = { roomId: r.id };
+        this.lamps.push({ light: pl, baseIntensity });
+        this.lampG.add(pl);
+      }
     });
 
     /* 墙体（按门窗洞分段生成） */
@@ -474,36 +1436,30 @@ export class Scene3D {
       const id = w.id || ('w' + i);
       if ((layout.demolished || []).includes(id)) return;
       const isLow = w.kind === 'low';
-      if (isLow){
-        this._wallBox(w, 0, Math.min(1, top));
-        return;
-      }
+      if (isLow){ this._wallBox(w, 0, Math.min(1, top)); return; }
       const openings = this._openingsOnWall(w, plan);
-      // 拆除段视作全高洞口（贯通到顶）
       (layout.demolitions || []).forEach(dm => {
         if (dm && dm.hostWall === w.id){
-          openings.push({ kind:'demolition', x0:dm.x0, y0:dm.y0, x1:dm.x1, y1:dm.y1 });
+          openings.push({ kind: 'demolition', x0: dm.x0, y0: dm.y0, x1: dm.x1, y1: dm.y1 });
         }
       });
       this._buildWallWithOpenings(w, openings, top);
     });
 
-    /* 补充：位于墙缺口处的窗（外凸窗 / 外飘窗）的窗台墙与窗楣墙。
-     * 这类窗的几何不落在任何一段墙的中心线上，需要主动补齐上下墙段，
-     * 否则 3D 场景里会看到窗下没有墙、玻璃"悬空"。 */
+    /* 缺口处的独立窗（外凸窗）：补齐上下墙段 */
     this._ensureWindowWalls(plan, layout, top);
 
-    /* 窗（上下墙 + 玻璃） */
+    /* 缺口处的门：补门头（过梁） */
+    this._ensureDoorWalls(plan, layout, top);
+
+    /* 窗玻璃 */
     (plan.windows || []).forEach(win => {
       const L = this.M(Math.hypot(win.x1 - win.x0, win.y1 - win.y0));
       const cx = this.wx((win.x0 + win.x1) / 2);
       const cz = this.wz((win.y0 + win.y1) / 2);
       const rotY = -Math.atan2(win.y1 - win.y0, win.x1 - win.x0);
       const sill = (win.sill || 900) / 1000;
-      const head = 2.4;
-      // 上下墙已由 _buildWallWithOpenings 处理，这里只画玻璃
-
-      const gh = Math.min(head, top) - sill;
+      const gh = Math.min(2.4, top) - sill;
       if (gh <= 0) return;
       const pane = new THREE.Mesh(new THREE.BoxGeometry(L, gh, .01), this.glassMat);
       pane.position.set(cx, sill + gh / 2, cz);
@@ -511,66 +1467,40 @@ export class Scene3D {
       this.archUp.add(pane);
     });
 
-    /* 门（门板 + 过梁） */
-    this.doors.length = 0;      // 每次重建前清空
+    /* 门 */
+    this.doors.length = 0;
     (plan.doors || []).forEach(d => {
       const dh = Math.min(2.05, top);
       const L = this.M(Math.hypot(d.x1 - d.x0, d.y1 - d.y0));
       const dirX = d.x1 - d.x0, dirY = d.y1 - d.y0;
       const Lw = Math.hypot(dirX, dirY) || 1;
       const ux = dirX / Lw, uy = dirY / Lw;
-
-      // 铰点由 hinge 决定
       const hingeAtX0 = d.hinge !== 'right';
       const hx = hingeAtX0 ? d.x0 : d.x1;
       const hy = hingeAtX0 ? d.y0 : d.y1;
-
-      // 关闭方向：从铰点指向另一端
       const cSign = hingeAtX0 ? 1 : -1;
       const cDirX = ux * cSign, cDirY = uy * cSign;
-      const baseAng = Math.atan2(-cDirY, cDirX);     // 2D → three.js Y 旋转
-
-      // 开启方向：由墙的法向量 + swing 决定，与铰点无关
+      const baseAng = Math.atan2(-cDirY, cDirX);
       const wallNx = -uy, wallNy = ux;
       const swingSign = d.swing === 'out' ? -1 : 1;
       const oDirX = wallNx * swingSign, oDirY = wallNy * swingSign;
       const openAngRaw = Math.atan2(-oDirY, oDirX);
-
-      // 归一化到 (-π, π]，避免插值时绕远路
       let delta = openAngRaw - baseAng;
       delta = Math.atan2(Math.sin(delta), Math.cos(delta));
       const openAng = baseAng + delta;
 
       const pivot = new THREE.Group();
       pivot.position.set(this.wx(hx), 0, this.wz(hy));
-      const leaf = new THREE.Mesh(
-        new THREE.BoxGeometry(L, dh, .04),
-        new THREE.MeshStandardMaterial({ color: d.entry ? '#6b4f3a' : '#efe6d8', roughness:.5 })
-      );
-      leaf.position.set(L / 2, dh / 2, 0);
-      leaf.castShadow = true;
-      pivot.add(leaf);
-
-      // 门把手（小圆球，便于拾取 / 视觉识别）
-      const knob = new THREE.Mesh(
-        new THREE.SphereGeometry(.03, 12, 8),
-        this.frameMat
-      );
+      const leaf = this._box(L, dh, .04,
+        this._mat(d.entry ? '#6b4f3a' : '#efe6d8', { roughness: .5 }), L / 2);
+      const knob = new THREE.Mesh(new THREE.SphereGeometry(.03, 12, 8),
+        this._mat('#cfd2d4', { metalness: .9, roughness: .25 }));
       knob.position.set(L - .07, Math.min(1, dh - .05), 0);
       knob.scale.z = 2.2;
-      pivot.add(knob);
+      pivot.add(leaf, knob);
 
-      // ---- door 对象：状态 + 铰点 + 开合角 ----
-      const door = {
-        pivot,
-        a0: baseAng,
-        a1: openAng,
-        cur: baseAng,
-        open: false,       // 默认关闭
-      };
+      const door = { pivot, a0: baseAng, a1: openAng, cur: baseAng, open: false };
       pivot.rotation.y = door.cur;
-
-      // 把 door 引用挂到 pivot 及所有子物体上，方便 _pick 找到
       pivot.userData.door = door;
       leaf.userData.door = door;
       knob.userData.door = door;
@@ -582,15 +1512,13 @@ export class Scene3D {
     this._applyGrow();
   }
 
-  /* ---------- 家具（按类型组合几何体） ---------- */
+  /* ---------- 家具 ---------- */
   buildFurn(){
     this._clear(this.furnG);
     (this.app.store.state.layout.furniture || []).forEach(f => {
-      const w = this.M(f.w), d = this.M(f.d), c = f.color || '#dddddd';
-      const g = this._furnMesh(f.type, w, d, c);
+      const g = this._furnMesh(f.type, this.M(f.w), this.M(f.d), f.color || '#dddddd');
       g.position.set(this.wx(f.cx), 0, this.wz(f.cy));
       g.rotation.y = -f.rot * Math.PI / 180;
-      // 把 fid 挂到组及所有子物体，便于 _pick 往上找
       g.userData.fid = f.id;
       g.traverse(o => { o.userData.fid = f.id; });
       this.furnG.add(g);
@@ -599,389 +1527,6 @@ export class Scene3D {
     this._applyGrow();
   }
 
-  /**
-   * 按家具类型生成组合几何体。
-   * 约定：返回 THREE.Group，原点在俯视中心、底面 y=0，width 沿 X、depth 沿 Z。
-   * @param {string} type  家具 type（与 furnitureLib 一致）
-   * @param {number} w     宽（米）
-   * @param {number} d     深（米）
-   * @param {string} color 主色
-   */
-  _furnMesh(type, w, d, color){
-    const g = new THREE.Group();
-    const mat = (c = color, rough = .75) => new THREE.MeshStandardMaterial({ color: c, roughness: rough });
-    const M  = mat(color, .78);                       // 主色
-    const Md = mat(shade(color, .72), .8);            // 深色 / 阴影面
-    const Ml = mat(shade(color, 1.28), .55);          // 亮色 / 软包
-    const Mk = mat('#2b2a26', .55);                   // 金属 / 深色零件
-    const Mw = mat('#ffffff', .4);                    // 白瓷 / 玻璃面板
-
-    const add = (geo, m, x, y, z) => {
-      const mesh = new THREE.Mesh(geo, m);
-      mesh.position.set(x, y, z);
-      mesh.castShadow = true; mesh.receiveShadow = true;
-      g.add(mesh);
-      return mesh;
-    };
-    const box = (W, H, D, x, y, z, m = M) => add(new THREE.BoxGeometry(W, H, D), m, x, y, z);
-    const cyl = (R, H, x, y, z, m = M, seg = 16) => add(new THREE.CylinderGeometry(R, R, H, seg), m, x, y, z);
-    const sph = (R, x, y, z, m = M) => add(new THREE.SphereGeometry(R, 14, 10), m, x, y, z);
-
-    switch (type){
-      /* ---------- 卧室 ---------- */
-      case 'bed': {
-        const bH = 0.3;
-        box(w, bH, d, 0, bH/2, 0, Md);                               // 床架
-        box(w * 0.94, 0.18, d * 0.88, 0, bH + 0.09, -d * 0.02, Ml);  // 床垫
-        const pW = w > 1.3 ? w * 0.4 : w * 0.72;
-        box(pW, 0.1, 0.32, w > 1.3 ? -w * 0.22 : 0, bH + 0.22, -d * 0.32, Ml);
-        if (w > 1.3) box(pW, 0.1, 0.32, w * 0.22, bH + 0.22, -d * 0.32, Ml);
-        box(w * 0.9, 0.06, d * 0.55, 0, bH + 0.22, d * 0.16, mat(shade(color, 1.12), .85)); // 被子
-        break;
-      }
-      case 'crib': {
-        const h = 0.85, ph = 0.04;
-        [[-w/2, -d/2], [w/2, -d/2], [-w/2, d/2], [w/2, d/2]].forEach(([x, z]) => box(ph, h, ph, x, h/2, z, Md));
-        box(w, 0.04, d, 0, 0.28, 0, Md);
-        box(w * 0.9, 0.06, d * 0.85, 0, 0.33, 0, Ml);
-        for (let i = 1; i < 6; i++){
-          const x = -w/2 + i * w / 6;
-          box(0.02, 0.42, 0.02, x, 0.62, -d/2 + 0.03);
-          box(0.02, 0.42, 0.02, x, 0.62,  d/2 - 0.03);
-        }
-        break;
-      }
-      case 'nightstand': {
-        const h = 0.5;
-        box(w, h, d, 0, h/2, 0, M);
-        box(w * 0.92, 0.015, 0.01, 0, h * 0.55, d/2 + 0.005, Mk);
-        box(w * 0.3, 0.02, 0.02, 0, h * 0.55, d/2 + 0.02, Mk);
-        break;
-      }
-      case 'wardrobe': {
-        const h = 1.9;
-        box(w, h, d, 0, h/2, 0, M);
-        box(0.015, h * 0.94, 0.015, 0, h/2, d/2 + 0.005, Mk);        // 门缝
-        box(0.035, 0.25, 0.03, -0.06, h * 0.5, d/2 + 0.03, Mk);      // 把手
-        box(0.035, 0.25, 0.03,  0.06, h * 0.5, d/2 + 0.03, Mk);
-        break;
-      }
-      case 'dresser': {
-        const h = 0.78;
-        box(w, h, d, 0, h/2, 0, M);
-        box(w * 1.02, 0.03, d * 1.02, 0, h + 0.015, 0, Md);
-        // 镜面
-        box(w * 0.55, 0.7, 0.02, 0, h + 0.38, -d/2 + 0.02, mat('#cad2d8', .25));
-        break;
-      }
-      case 'desk': {
-        const h = 0.72;
-        box(w, 0.04, d, 0, h, 0, M);
-        const px = w/2 - 0.05, pz = d/2 - 0.05;
-        [[-px, -pz], [px, -pz], [-px, pz], [px, pz]].forEach(([x, z]) => box(0.04, h, 0.04, x, h/2, z, Md));
-        break;
-      }
-      case 'chair': {
-        const h = 0.45;
-        box(w, 0.05, d, 0, h, 0, M);
-        box(w, 0.55, 0.04, 0, h + 0.3, -d/2 + 0.03, M);              // 靠背
-        const px = w/2 - 0.04, pz = d/2 - 0.04;
-        [[-px, -pz], [px, -pz], [-px, pz], [px, pz]].forEach(([x, z]) => box(0.03, h, 0.03, x, h/2, z, Md));
-        break;
-      }
-      case 'bookshelf': {
-        const h = 1.8;
-        box(w, h, d, 0, h/2, 0, M);
-        box(w * 1.01, 0.015, 0.012, 0, h * 0.32, d/2 + 0.005, Md);
-        box(w * 1.01, 0.015, 0.012, 0, h * 0.64, d/2 + 0.005, Md);
-        const vn = Math.max(2, Math.round(w / 0.5));
-        for (let i = 1; i < vn; i++) box(0.012, h * 0.9, 0.012, -w/2 + i * w / vn, h/2, d/2 + 0.005, Md);
-        break;
-      }
-      case 'baycushion': {
-        box(w, 0.1, d, 0, 0.05, 0, M);
-        box(w * 0.85, 0.03, d * 0.85, 0, 0.11, 0, Ml);
-        break;
-      }
-
-      /* ---------- 客厅 ---------- */
-      case 'sofa': case 'armchair': case 'cornersofa': {
-        const bH = 0.36;
-        box(w, bH, d, 0, bH/2, 0, Md);
-        box(w, 0.65, d * 0.22, 0, 0.32, -d/2 + d * 0.11, M);          // 靠背
-        box(w * 0.11, 0.5, d, -w/2 + w * 0.055, 0.25, 0, M);
-        box(w * 0.11, 0.5, d,  w/2 - w * 0.055, 0.25, 0, M);
-        const inner = w * 0.78;
-        const n = type === 'armchair' ? 1 : (w > 2.2 ? 3 : 2);
-        const cw = (inner / n) * 0.92;
-        for (let i = 0; i < n; i++){
-          const cx = -inner/2 + i * (inner/n) + (inner/n) / 2;
-          box(cw, 0.15, d * 0.68, cx, bH + 0.075, d * 0.08, Ml);
-        }
-        box(inner, 0.3, 0.1, 0, 0.52, -d/2 + 0.14, Ml);
-        break;
-      }
-      case 'beanbag': {
-        const R = Math.min(w, d) / 2;
-        const s = new THREE.Mesh(new THREE.SphereGeometry(R, 20, 14), M);
-        s.scale.y = 0.62;
-        s.position.y = R * 0.55;
-        s.castShadow = true; s.receiveShadow = true;
-        g.add(s);
-        break;
-      }
-      case 'coffeetable': {
-        const h = 0.4;
-        box(w, 0.055, d, 0, h, 0, M);
-        box(w * 0.85, 0.03, d * 0.7, 0, h * 0.4, 0, Md);             // 下层隔板
-        const px = w/2 - 0.05, pz = d/2 - 0.05;
-        [[-px, -pz], [px, -pz], [-px, pz], [px, pz]].forEach(([x, z]) => box(0.04, h, 0.04, x, h/2, z, Md));
-        break;
-      }
-      case 'sidetable': {
-        const h = 0.55;
-        cyl(w / 2, 0.04, 0, h, 0, M, 20);
-        cyl(0.035, h, 0, h / 2, 0, Md, 12);
-        cyl(w * 0.25, 0.03, 0, 0.015, 0, Md, 20);
-        break;
-      }
-      case 'rug': {
-        const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, 0.012, d), M);
-        mesh.position.set(0, 0.006, 0);
-        mesh.receiveShadow = true;
-        g.add(mesh);
-        break;
-      }
-      case 'tvstand': case 'cabinet': case 'shoecab': {
-        const h = type === 'tvstand' ? 0.5 : 0.9;
-        box(w, h, d, 0, h/2, 0, M);
-        box(w * 1.02, 0.03, d * 1.03, 0, h + 0.015, 0, Md);
-        // 抽屉缝
-        box(w * 0.9, 0.012, 0.012, 0, h * 0.5, d/2 + 0.005, Mk);
-        break;
-      }
-      case 'floorlamp': {
-        cyl(0.15, 0.03, 0, 0.015, 0, Md, 20);
-        cyl(0.018, 1.2, 0, 0.62, 0, Md, 10);
-        cyl(0.18, 0.26, 0, 1.32, 0, mat('#fff6dd', .4), 20);
-        break;
-      }
-      case 'plant': {
-        const R = Math.min(w, d) / 2 * 0.4;
-        cyl(R, 0.35, 0, 0.175, 0, mat('#a8794f', .85), 14);
-        sph(R * 1.7, 0, 0.8, 0, mat(shade(color, .9), .9));
-        sph(R * 1.2, R * 0.42, 1.05, -R * 0.22, mat(shade(color, 1.12), .9));
-        sph(R * 1.0, -R * 0.5, 0.95, R * 0.3, mat(shade(color, .8), .9));
-        break;
-      }
-
-      /* ---------- 餐厨 ---------- */
-      case 'table': {
-        const h = 0.74;
-        box(w, 0.05, d, 0, h, 0, M);
-        const px = w/2 - 0.06, pz = d/2 - 0.06;
-        [[-px, -pz], [px, -pz], [-px, pz], [px, pz]].forEach(([x, z]) => box(0.05, h, 0.05, x, h/2, z, Md));
-        break;
-      }
-      case 'roundtable': {
-        const h = 0.74;
-        cyl(w / 2, 0.05, 0, h, 0, M, 28);
-        cyl(0.07, h, 0, h/2, 0, Md, 14);
-        cyl(w * 0.22, 0.04, 0, 0.02, 0, Md, 20);
-        break;
-      }
-      case 'counter': case 'island': {
-        const h = 0.88;
-        box(w, h - 0.04, d, 0, (h - 0.04)/2, 0, M);
-        box(w * 1.02, 0.04, d * 1.05, 0, h - 0.02, 0, mat('#d0c9b8', .55));
-        break;
-      }
-      case 'stove': {
-        const h = 0.9;
-        box(w, h, d, 0, h/2, 0, mat('#2f2f2f', .5));
-        const r = Math.min(w, d) * 0.17;
-        const pts = w / d > 1.4
-          ? [[-w * 0.25, 0], [w * 0.25, 0]]
-          : [[-w * 0.25, -d * 0.25], [w * 0.25, -d * 0.25], [-w * 0.25, d * 0.25], [w * 0.25, d * 0.25]];
-        pts.forEach(([x, z]) => {
-          cyl(r, 0.02, x, h + 0.01, z, mat('#555', .4), 18);
-          cyl(r * 0.5, 0.03, x, h + 0.02, z, mat('#181818', .35), 14);
-        });
-        break;
-      }
-      case 'ksink': {
-        const h = 0.88;
-        box(w, h, d, 0, h/2, 0, mat('#dcdcdc', .5));
-        box(w * 0.42, 0.05, d * 0.66, -w * 0.22, h - 0.02, 0, mat('#a8b0b4', .35));
-        box(w * 0.42, 0.05, d * 0.66,  w * 0.22, h - 0.02, 0, mat('#a8b0b4', .35));
-        cyl(0.015, 0.2, 0, h + 0.1, -d * 0.3, mat('#c8ccce', .3), 10);
-        break;
-      }
-      case 'fridge': {
-        const h = 1.85;
-        box(w, h, d, 0, h/2, 0, mat(color, .45));
-        box(w * 1.01, 0.015, 0.01, 0, h * 0.7, d/2 + 0.005, Mk);
-        box(0.03, 0.5, 0.035, w * 0.32, h * 0.5, d/2 + 0.03, Mk);
-        box(0.03, 0.5, 0.035, -w * 0.32, h * 0.5, d/2 + 0.03, Mk);
-        break;
-      }
-      case 'barstool': {
-        const h = 0.75;
-        cyl(w * 0.45, 0.05, 0, h, 0, M, 20);
-        cyl(0.025, h, 0, h/2, 0, Md, 10);
-        cyl(w * 0.35, 0.02, 0, 0.01, 0, Md, 20);
-        break;
-      }
-
-      /* ---------- 卫浴 ---------- */
-      case 'toilet': {
-        box(w, 0.65, d * 0.28, 0, 0.325, -d * 0.36, Mw);            // 水箱
-        box(w * 0.9, 0.18, d * 0.55, 0, 0.09, d * 0.1, Mw);
-        const seat = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.45, w * 0.5, 0.1, 18), Mw);
-        seat.scale.z = (d / w) * 0.9;
-        seat.position.set(0, 0.23, d * 0.1);
-        seat.castShadow = true; seat.receiveShadow = true;
-        g.add(seat);
-        break;
-      }
-      case 'vanity': {
-        const h = 0.85;
-        box(w, h - 0.04, d, 0, (h - 0.04)/2, 0, M);
-        box(w * 1.02, 0.04, d * 1.02, 0, h - 0.02, 0, Mw);
-        const R = Math.min(w * 0.32, 0.22);
-        cyl(R, 0.08, 0, h + 0.02, 0, mat('#eef3f6', .3), 20);
-        cyl(0.012, 0.14, 0, h + 0.1, -d * 0.32, mat('#c8ccce', .3), 10);
-        break;
-      }
-      case 'shower': {
-        const gh = 2.0;
-        box(w, 0.04, d, 0, 0.02, 0, Mw);
-        const gm = new THREE.MeshPhysicalMaterial({
-          color: 0xa8c8d4, roughness: .05, transparent: true, opacity: .22,
-          depthWrite: false, side: THREE.DoubleSide,
-        });
-        box(w, gh, 0.01, 0, gh/2, -d/2 + 0.005, gm);
-        box(0.01, gh, d, -w/2 + 0.005, gh/2, 0, gm);
-        box(0.01, gh, d,  w/2 - 0.005, gh/2, 0, gm);
-        cyl(0.018, 0.4, 0, gh - 0.2, -d/2 + 0.1, mat('#c8ccce', .3), 10);
-        break;
-      }
-      case 'bathtub': {
-        box(w, 0.55, d, 0, 0.275, 0, Mw);
-        box(w * 0.85, 0.44, d * 0.78, 0, 0.4, 0, mat('#d8e0e4', .25));
-        break;
-      }
-      case 'washer': case 'dryer': {
-        const h = 0.85;
-        box(w, h, d, 0, h/2, 0, mat(color, .55));
-        const r = Math.min(w, d) * 0.3;
-        const win = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.02, 24), mat('#3d3d3d', .3));
-        win.rotation.x = Math.PI / 2;
-        win.position.set(0, h * 0.55, d/2 + 0.005);
-        g.add(win);
-        const inn = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.72, r * 0.72, 0.02, 24), mat('#c8d4da', .2));
-        inn.rotation.x = Math.PI / 2;
-        inn.position.set(0, h * 0.55, d/2 + 0.012);
-        g.add(inn);
-        break;
-      }
-      case 'waterheater': {
-        const R = Math.min(w, d) / 2;
-        cyl(R, 0.6, 0, 1.5, 0, Mw, 20);
-        cyl(R * 0.4, 0.05, 0, 1.85, 0, mat('#c0c0c0', .4), 12);
-        break;
-      }
-
-      /* ---------- 家电 ---------- */
-      case 'tv': {
-        box(w, 0.6, 0.04, 0, 0.7, 0, mat('#1d1d1f', .3));
-        box(0.1, 0.4, 0.08, 0, 0.2, 0, Mk);
-        box(w * 0.3, 0.02, 0.2, 0, 0.01, 0, Mk);
-        break;
-      }
-      case 'aircon': {
-        const h = 1.8;
-        box(w, h, d, 0, h/2, 0, Mw);
-        box(w * 0.7, 0.4, 0.02, 0, h * 0.85, d/2 + 0.005, mat('#c0c0c0', .4));
-        break;
-      }
-      case 'acwall': {
-        box(w, 0.3, d, 0, 2.3, 0, Mw);
-        box(w * 0.85, 0.02, 0.02, 0, 2.18, d/2 + 0.02, mat('#c0c0c0', .4));
-        break;
-      }
-      case 'dishwasher': {
-        const h = 0.85;
-        box(w, h, d, 0, h/2, 0, mat(color, .5));
-        box(w * 0.9, 0.02, 0.012, 0, h * 0.85, d/2 + 0.005, mat('#c0c0c0', .4));
-        box(w * 0.5, 0.04, 0.04, 0, h * 0.9, d/2 + 0.02, mat('#c0c0c0', .4));
-        break;
-      }
-      case 'ovencol': {
-        const h = 2.0;
-        box(w, h, d, 0, h/2, 0, M);
-        box(w * 0.85, 0.5, 0.02, 0, h * 0.78, d/2 + 0.005, mat('#1d1d1f', .3));
-        box(w * 0.85, 0.5, 0.02, 0, h * 0.25, d/2 + 0.005, mat('#1d1d1f', .3));
-        break;
-      }
-      case 'purifier': {
-        const R = Math.min(w, d) / 2;
-        cyl(R, 0.7, 0, 0.35, 0, Mw, 20);
-        cyl(R * 0.6, 0.05, 0, 0.72, 0, mat('#c0c0c0', .4), 16);
-        break;
-      }
-
-      /* ---------- 书房 · 休闲 ---------- */
-      case 'officechair': {
-        // 五星底座
-        for (let i = 0; i < 5; i++){
-          const a = i * Math.PI * 2 / 5;
-          const l = w * 0.45;
-          const leg = new THREE.Mesh(new THREE.BoxGeometry(l, 0.03, 0.05), Md);
-          leg.position.set(Math.cos(a) * l / 2, 0.03, Math.sin(a) * l / 2);
-          leg.rotation.y = -a;
-          leg.castShadow = true; leg.receiveShadow = true;
-          g.add(leg);
-          cyl(0.03, 0.06, Math.cos(a) * l, 0.03, Math.sin(a) * l, Mk, 8);
-        }
-        cyl(0.04, 0.5, 0, 0.28, 0, Md, 10);
-        box(w * 0.9, 0.1, d * 0.9, 0, 0.55, 0, M);                   // 座面
-        box(w * 0.85, 0.6, 0.08, 0, 0.85, -d/2 + 0.04, M);           // 靠背
-        box(0.05, 0.18, d * 0.6, -w * 0.42, 0.7, 0, Md);
-        box(0.05, 0.18, d * 0.6,  w * 0.42, 0.7, 0, Md);
-        break;
-      }
-      case 'piano': {
-        box(w, 0.9, d * 0.5, 0, 0.45, -d * 0.2, Mk);
-        box(w * 0.9, 0.12, d * 0.4, 0, 0.95, -d * 0.15, Mk);
-        box(w * 0.85, 0.03, d * 0.35, 0, 0.9, d * 0.15, Mw);
-        for (let i = 0; i < 30; i++){
-          const x = -w * 0.42 + i * w * 0.84 / 30;
-          box(0.008, 0.02, d * 0.3, x, 0.915, d * 0.15, Mk);
-        }
-        box(0.06, 0.9, 0.06, -w * 0.42, 0.45, d * 0.4, Mk);
-        box(0.06, 0.9, 0.06,  w * 0.42, 0.45, d * 0.4, Mk);
-        break;
-      }
-      case 'treadmill': {
-        box(w, 0.1, d * 0.9, 0, 0.05, 0, mat(color, .6));
-        box(w * 0.85, 0.05, d * 0.7, 0, 0.11, 0, Mk);
-        box(0.06, 1.0, 0.06, -w * 0.4, 0.6, -d * 0.4, mat(color, .6));
-        box(0.06, 1.0, 0.06,  w * 0.4, 0.6, -d * 0.4, mat(color, .6));
-        box(w, 0.04, 0.04, 0, 1.05, -d * 0.4, mat('#2b2b2b', .5));
-        box(w * 0.5, 0.25, 0.03, 0, 1.1, -d * 0.4, Mk);
-        break;
-      }
-
-      /* ---------- 兜底：方块 ---------- */
-      default: {
-        box(w, 0.6, d, 0, 0.3, 0, M);
-      }
-    }
-    return g;
-  }
-
-  /* ---------- 同步（重建建筑 + 家具） ---------- */
   sync(force){
     if (!this.inited) return;
     if (!this.active && !force) return;
@@ -995,26 +1540,52 @@ export class Scene3D {
     this.furnG.scale.y = Math.max(this.furnGrow, .001);
   }
 
-  /* ---------- 光照 ---------- */
   _applyLight(){
-    const t = (this.opt.hour - 6) / 12;
-    const az = Math.PI * (.15 + t * .7);
-    const el = Math.sin(Math.PI * t) * 1.05 + .15;
-    const warm = 1 - Math.sin(Math.PI * t);
-    this.sun.position.set(Math.cos(az) * 18, Math.sin(el) * 20 + 3, -Math.sin(az) * 10 + 8);
+    const hour = this.opt.hour;
+    const compass = (this.app.store.state.plan && this.app.store.state.plan.compass)
+      || { north: 0, lat: 39.9, lng: 116.4 };
+    const lat = Math.max(-89, Math.min(89, +compass.lat || 39.9));
+    const northDeg = ((+compass.north || 0) % 360 + 360) % 360;
+
+    /* 简化天文模型：赤纬用 6 月 21 日近似（用户可只调"日照时间"滑块） */
+    const δ = 23.45 * Math.PI / 180 * Math.sin(2 * Math.PI * (284 + 172) / 365);
+    const φ = lat * Math.PI / 180;
+    const ω = (hour - 12) * 15 * Math.PI / 180;                 // 时角
+    const sinAlt = Math.sin(φ) * Math.sin(δ) + Math.cos(φ) * Math.cos(δ) * Math.cos(ω);
+    const alt = Math.asin(Math.max(-1, Math.min(1, sinAlt)));   // 高度角
+    const cosAlt = Math.cos(alt) || 1e-4;
+    const cosAz = (Math.sin(δ) - Math.sin(alt) * Math.sin(φ)) / (cosAlt * Math.cos(φ) || 1e-4);
+    let az = Math.acos(Math.max(-1, Math.min(1, cosAz)));       // 方位角（0=北，顺时针）
+    if (ω > 0) az = 2 * Math.PI - az;                            // 下午在西侧
+    az += northDeg * Math.PI / 180;                              // 图纸北向旋转
+
+    /* 场景方向：东 = +x，北 = -z */
+    const y = Math.sin(alt);
+    const horiz = cosAlt;
+    const sx = Math.sin(az) * horiz;
+    const sz = -Math.cos(az) * horiz;
+    const dir = new THREE.Vector3(sx, y, sz).normalize();
+    const dist = 25;
+    this.sun.position.copy(dir.clone().multiplyScalar(dist));
     this.sun.target.position.set(0, 0, 0);
-    this.sun.color.setHSL(.09, .5 + warm * .4, .92 - warm * .12);
-    this.sun.intensity = this.opt.night ? .05 : 1.4 + Math.sin(Math.PI * t) * 1.6;
-    this.hemi.intensity = this.opt.night ? .12 : 1.1;
+
+    const above = Math.max(0, Math.sin(alt));                    // 0（夜晚）~ 1（正午）
+    const warm = 1 - Math.min(1, above * 2);
+    this.sun.color.setHSL(.09, .35 + warm * .4, .95 - warm * .12);
+    this.sun.intensity = this.opt.night ? .05 : (.4 + above * 2.6);
+    this.hemi.intensity = this.opt.night ? .12 : (.55 + above * .5);
     this.scene.background = new THREE.Color(this.opt.night ? 0x1c2130 : 0xf7f4ee);
     this.ground.material.color.set(this.opt.night ? 0x2a2e38 : 0xf2eee7);
-    const h = Math.floor(this.opt.hour);
-    const m = Math.round((this.opt.hour - h) * 60);
+
+    /* 顶灯：夜景开、白天灭 */
+    (this.lamps || []).forEach(l => { l.light.intensity = this.opt.night ? l.baseIntensity : 0; });
+
+    const h = Math.floor(hour);
+    const m = Math.round((hour - h) * 60);
     const t2 = $('#sunT');
     if (t2) t2.textContent = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
   }
 
-  /* ---------- 相机 ---------- */
   _planPose(){
     const vp = this.app.viewport;
     const SW = this.SW(), SH = this.SH();
@@ -1023,16 +1594,16 @@ export class Scene3D {
     const visH = SH / vp.s / 1000;
     const dist = visH / 2 / Math.tan(FOV / 2 * Math.PI / 180);
     const t = new THREE.Vector3(this.wx(cx), 0, this.wz(cy));
-    return { t, p:new THREE.Vector3(t.x, dist, t.z + 1e-4) };
+    return { t, p: new THREE.Vector3(t.x, dist, t.z + 1e-4) };
   }
   _isoFrom(P){
     const d = Math.max(5, Math.min(30, P.p.y));
     const dir = new THREE.Vector3(.3, .82, .49).normalize();
-    return { t:P.t.clone(), p:P.t.clone().addScaledVector(dir, d) };
+    return { t: P.t.clone(), p: P.t.clone().addScaledVector(dir, d) };
   }
-  _isoWhole(){ return { t:new THREE.Vector3(0, 0, 0), p:new THREE.Vector3(5.5, 15.5, 10) }; }
-  _topWhole(){ return { t:new THREE.Vector3(0, 0, 0), p:new THREE.Vector3(0, 19, 1e-4) }; }
-  _curPose(){ return { t:this.orbit.target.clone(), p:this.camera.position.clone() }; }
+  _isoWhole(){ return { t: new THREE.Vector3(0, 0, 0), p: new THREE.Vector3(5.5, 15.5, 10) }; }
+  _topWhole(){ return { t: new THREE.Vector3(0, 0, 0), p: new THREE.Vector3(0, 19, 1e-4) }; }
+  _curPose(){ return { t: this.orbit.target.clone(), p: this.camera.position.clone() }; }
   _camTween(A, B, e){
     const t = A.t.clone().lerp(B.t, e);
     const sa = new THREE.Spherical().setFromVector3(A.p.clone().sub(A.t));
@@ -1042,17 +1613,15 @@ export class Scene3D {
     const s = new THREE.Spherical(
       sa.radius + (sb.radius - sa.radius) * e,
       sa.phi + (sb.phi - sa.phi) * e,
-      sa.theta + dth * e
-    );
+      sa.theta + dth * e);
     this.camera.position.copy(t).add(new THREE.Vector3().setFromSpherical(s));
     this.camera.lookAt(t);
     this.orbit.target.copy(t);
   }
-  _animate(dur, fn){ return new Promise(res => { this.anim = { t0:performance.now(), dur, fn, res }; }); }
+  _animate(dur, fn){ return new Promise(res => { this.anim = { t0: performance.now(), dur, fn, res }; }); }
   _wait(ms){ return new Promise(r => setTimeout(r, ms)); }
-  flyTo(B, dur = 900){ this.fly = { t0:performance.now(), dur, A:this._curPose(), B }; }
+  flyTo(B, dur = 900){ this.fly = { t0: performance.now(), dur, A: this._curPose(), B }; }
 
-  /* ---------- 进入 / 退出 ---------- */
   async enter(){
     if (!this.inited) await this.init();
     this.active = true;
@@ -1063,11 +1632,8 @@ export class Scene3D {
 
     this.opt.mode = 'orbit';
     this.orbit.enabled = false;
-
     const A = this._planPose(), B = this._isoFrom(A);
-    this.grow = 0;
-    this.furnGrow = 0;
-    this._applyGrow();
+    this.grow = 0; this.furnGrow = 0; this._applyGrow();
     this.camera.position.copy(A.p);
     this.orbit.target.copy(A.t);
     this.camera.lookAt(A.t);
@@ -1079,9 +1645,9 @@ export class Scene3D {
 
     await this._wait(420);
     await this._animate(1700, t => {
-      this._camTween(A, B, ease(clamp01(t / .85)));
-      this.grow = ease(clamp01((t - .1) / .55));
-      this.furnGrow = ease(clamp01((t - .45) / .5));
+      this._camTween(A, B, 1 - Math.pow(1 - Math.min(1, t / .85), 3));
+      this.grow = 1 - Math.pow(1 - Math.max(0, Math.min(1, (t - .1) / .55)), 3);
+      this.furnGrow = 1 - Math.pow(1 - Math.max(0, Math.min(1, (t - .45) / .5)), 3);
       this._applyGrow();
     });
     this.orbit.enabled = true;
@@ -1090,14 +1656,16 @@ export class Scene3D {
 
   async exit(){
     if (!this.active) return;
+    if (this.walk) this.exitWalk(true);
     this.fly = null;
     this.orbit.enabled = false;
     this.stage.classList.add('animating');
     const A = this._curPose(), B = this._planPose();
     await this._animate(1300, t => {
-      this._camTween(A, B, ease(clamp01((t - .1) / .9)));
-      this.furnGrow = 1 - ease(clamp01(t / .45));
-      this.grow = 1 - ease(clamp01((t - .2) / .6));
+      const e = Math.max(0, Math.min(1, (t - .1) / .9));
+      this._camTween(A, B, 1 - Math.pow(1 - e, 3));
+      this.furnGrow = 1 - Math.max(0, Math.min(1, t / .45));
+      this.grow = 1 - Math.max(0, Math.min(1, (t - .2) / .6));
       this._applyGrow();
     });
     this.stage.classList.remove('is3d');
@@ -1110,7 +1678,6 @@ export class Scene3D {
     this._applyGrow();
   }
 
-  /* ---------- 主循环 ---------- */
   _startLoop(){
     if (this.raf) return;
     this.clock = new THREE.Clock();
@@ -1122,12 +1689,13 @@ export class Scene3D {
       this._lastT = now;
 
       if (this.anim){
-        const t = clamp01((now - this.anim.t0) / this.anim.dur);
+        const t = Math.max(0, Math.min(1, (now - this.anim.t0) / this.anim.dur));
         this.anim.fn(t);
         if (t >= 1){ const r = this.anim.res; this.anim = null; r(); }
       } else if (this.fly){
-        const t = clamp01((now - this.fly.t0) / this.fly.dur);
-        this._camTween(this.fly.A, this.fly.B, ease(t));
+        const t = Math.max(0, Math.min(1, (now - this.fly.t0) / this.fly.dur));
+        const e = t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        this._camTween(this.fly.A, this.fly.B, e);
         if (t >= 1) this.fly = null;
       } else if (this.walk){
         this._walkStep(dt);
@@ -1135,7 +1703,6 @@ export class Scene3D {
         this.orbit.update();
       }
 
-      // ---- 门开合插值 ----
       if (this.doors.length){
         this.doors.forEach(d => {
           const tg = d.open ? d.a1 : d.a0;
@@ -1143,69 +1710,52 @@ export class Scene3D {
           d.pivot.rotation.y = d.cur;
         });
       }
-
       this.renderer.render(this.scene, this.camera);
     };
     loop();
   }
 
-  /* ---------- 拾取（射线检测） ---------- */
   _pick(e){
     if (!this.renderer) return null;
     const r = this.renderer.domElement.getBoundingClientRect();
     const ptr = new THREE.Vector2(
       (e.clientX - r.left) / r.width * 2 - 1,
-      -(e.clientY - r.top) / r.height * 2 + 1
-    );
+      -(e.clientY - r.top) / r.height * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ptr, this.camera);
-
-    // 家具 + 建筑上部（含墙、门、窗、玻璃）都参与拾取；
-    // 具体命中什么由 userData 过滤决定，未注册 userData 的对象会被跳过。
     const targets = [this.furnG, this.archUp];
     const hits = ray.intersectObjects(targets, true);
     for (const h of hits){
-      // 跳过玻璃（透明，不挡视线）
       if (h.object.material === this.glassMat) continue;
-      // 从命中对象往上找 userData（door / fid / room）
       let o = h.object;
       while (o && !o.userData.door && !o.userData.fid && !o.userData.room && o !== this.scene){
         o = o.parent;
       }
-      if (o?.userData?.door) return { door:o.userData.door, dist:h.distance };
-      if (o?.userData?.fid)  return { fid: o.userData.fid,  dist:h.distance };
-      if (o?.userData?.room) return { room:o.userData.room, dist:h.distance };
+      if (o?.userData?.door) return { door: o.userData.door, dist: h.distance };
+      if (o?.userData?.fid)  return { fid: o.userData.fid,  dist: h.distance };
+      if (o?.userData?.room) return { room: o.userData.room, dist: h.distance };
     }
     return null;
   }
 
-  /* ---------- 拖放落点（供家具库用） ---------- */
   groundAt(x, y){
     if (!this.active || this.anim) return null;
     const r = this.renderer.domElement.getBoundingClientRect();
     const ptr = new THREE.Vector2(
       (x - r.left) / r.width * 2 - 1,
-      -(y - r.top) / r.height * 2 + 1
-    );
+      -(y - r.top) / r.height * 2 + 1);
     const ray = new THREE.Raycaster();
     ray.setFromCamera(ptr, this.camera);
     const g = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     const hit = new THREE.Vector3();
     if (!ray.ray.intersectPlane(g, hit)) return null;
     if (hit.distanceTo(this.camera.position) > 60) return null;
-    return { x:hit.x * 1000 + OX, y:hit.z * 1000 + OY, s:.05 };
+    return { x: hit.x * 1000 + OX, y: hit.z * 1000 + OY, s: .05 };
   }
 
-  /* ---------- 工具栏接口 ---------- */
   setMode(m){
     if (this.anim) return;
-    if (m === 'walk'){
-      // 先弹遮罩，用户点击后再真正进入漫游
-      this._showWalkOverlay();
-      document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === 'walk'));
-      return;
-    }
-    // 回到鸟瞰 / 斜视
+    if (m === 'walk'){ this._showWalkOverlay(); document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === 'walk')); return; }
     this._hideWalkOverlay();
     if (this.walk) this.exitWalk(true);
     this.opt.mode = m;
@@ -1235,29 +1785,20 @@ export class Scene3D {
     const t = new THREE.Vector3(
       this.wx((Math.min(...xs) + Math.max(...xs)) / 2),
       .6,
-      this.wz((Math.min(...ys) + Math.max(...ys)) / 2)
-    );
+      this.wz((Math.min(...ys) + Math.max(...ys)) / 2));
     const size = this.M(Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys)));
-    this.flyTo({
-      t,
-      p: new THREE.Vector3(t.x + size + 3, size * 1.3 + 2.5, t.z + size + 3),
-    });
+    this.flyTo({ t, p: new THREE.Vector3(t.x + size + 3, size * 1.3 + 2.5, t.z + size + 3) });
   }
 
-  /* ---------- 其他 ---------- */
   _syncHint(){
     const h = $('#hint3d');
     if (!h) return;
     if (this.walk){
-      h.textContent = tr(
-        'WASD 移动 · 鼠标转向 · Shift 快走 · 滚轮调焦 · E 开门 · Esc 退出',
-        'WASD move · mouse look · Shift run · wheel FOV · E door · Esc exit'
-      );
+      h.textContent = tr('WASD 移动 · 鼠标转向 · Shift 快走 · 滚轮调焦 · E 开门 · Esc 退出',
+                        'WASD move · mouse look · Shift run · wheel FOV · E door · Esc exit');
     } else {
-      h.textContent = tr(
-        '左键旋转 · 右键平移 · 滚轮缩放 · 单击门板开关门',
-        'Left-drag orbits · scroll zooms · click a door leaf to open/close'
-      );
+      h.textContent = tr('左键旋转 · 右键平移 · 滚轮缩放 · 单击门板开关门',
+                        'Left-drag orbits · scroll zooms · click a door leaf to open/close');
     }
   }
   relang(){ this._syncHint(); }
@@ -1269,17 +1810,11 @@ export class Scene3D {
   }
   walking(){ return this.walk != null; }
 
-  /* ============================================================
-   *  漫游模式
-   * ============================================================ */
-
-  /** 显示「点击开始」遮罩 */
+  /* ---------- 漫游辅助 ---------- */
   _showWalkOverlay(){
     const ov = document.getElementById('walkOverlay');
     if (!ov){ this.enterWalk(); return; }
-    const w1 = document.getElementById('wo1');
-    const w2 = document.getElementById('wo2');
-    const w3 = document.getElementById('wo3');
+    const w1 = document.getElementById('wo1'), w2 = document.getElementById('wo2'), w3 = document.getElementById('wo3');
     if (w1) w1.textContent = tr('点击开始，从入户门进入', 'Click to start from the entry door');
     if (w2) w2.textContent = tr('WASD 移动 · 鼠标转向 · Shift 快走', 'WASD to move · mouse to look · Shift to run');
     if (w3) w3.textContent = tr('E 开关正前方的门 · Esc 退出漫游', 'E toggles the door ahead · Esc exits');
@@ -1290,14 +1825,11 @@ export class Scene3D {
     const ov = document.getElementById('walkOverlay');
     if (ov) ov.style.display = 'none';
   }
-
-  /** 进入漫游 */
   enterWalk(){
     if (!this.active) return;
     const plan = this.app.store.state.plan;
     const doors = plan.doors || [];
     const entry = doors.find(d => d.entry) || doors[0];
-
     let px, pz, yaw;
     if (entry){
       const cx = (entry.x0 + entry.x1) / 2;
@@ -1307,30 +1839,24 @@ export class Scene3D {
       const ux = dx / L, uy = dy / L;
       const nx = -uy, ny = ux;
       const sgn = entry.swing === 'out' ? -1 : 1;
-      const oX = nx * sgn, oY = ny * sgn;   // 开门方向（世界 mm）
-      // 站在门外侧 0.9m
+      const oX = nx * sgn, oY = ny * sgn;
       px = this.wx(cx - oX * 900);
       pz = this.wz(cy - oY * 900);
-      // 看向门内（对齐 oDir 方向）
       yaw = Math.atan2(-oX, -oY);
     } else {
-      const b = plan.bounds || { x:-4000, y:-4000, w:14000, h:12000 };
+      const b = plan.bounds || { x: -4000, y: -4000, w: 14000, h: 12000 };
       px = this.wx(b.x + b.w / 2);
       pz = this.wz(b.y + b.h / 2) + 3;
       yaw = 0;
     }
-
-    this.anim = null;
-    this.fly = null;
-    this.walk = { x:px, z:pz, y:1.6, yaw, pitch:0, speed:2.4, runMul:1.8, locked:false, fov:WALK_FOV };
+    this.anim = null; this.fly = null;
+    this.walk = { x: px, z: pz, y: 1.6, yaw, pitch: 0, speed: 2.4, runMul: 1.8, locked: false, fov: WALK_FOV };
     this.opt.mode = 'walk';
     this.orbit.enabled = false;
-    // 第一人称：切换到较宽的 FOV（人眼舒适视野，房间不闭塞）
     this.camera.fov = WALK_FOV;
     this.camera.updateProjectionMatrix();
     this._applyWalkCam();
 
-    // UI
     const cross = document.getElementById('cross');
     if (cross) cross.style.display = 'block';
     const joy = document.getElementById('joy');
@@ -1339,44 +1865,28 @@ export class Scene3D {
     if (we){ we.style.display = 'block'; we.textContent = tr('退出漫游', 'Exit walk'); }
     document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === 'walk'));
 
-    // 尝试指针锁定（失败也允许按住左键拖动）
-    try {
-      const p = this.renderer.domElement.requestPointerLock?.();
-      if (p && p.catch) p.catch(() => {});
-    } catch {}
-
+    try { const p = this.renderer.domElement.requestPointerLock?.(); if (p && p.catch) p.catch(() => {}); } catch {}
     this._syncHint();
   }
-
-  /** 退出漫游；silent=true 时不飞回鸟瞰（用于切到其他模式） */
   exitWalk(silent){
     if (!this.walk) return;
     this.walk = null;
     this._joy = null;
     if (document.pointerLockElement) document.exitPointerLock?.();
-
     const cross = document.getElementById('cross');
     if (cross) cross.style.display = 'none';
     const joy = document.getElementById('joy');
     if (joy) joy.style.display = 'none';
     const we = document.getElementById('walkExit');
     if (we) we.style.display = 'none';
-
     this.opt.mode = 'orbit';
     this.orbit.enabled = true;
-    // 恢复鸟瞰视角的 FOV
     this.camera.fov = FOV;
     this.camera.updateProjectionMatrix();
     document.querySelectorAll('#modes3d .btn').forEach(b => b.classList.toggle('on', b.dataset.mode === 'orbit'));
-
-    if (!silent){
-      this.flyTo(this._isoWhole(), 700);
-      toast(tr('已退出漫游', 'Exited walk mode'));
-    }
+    if (!silent){ this.flyTo(this._isoWhole(), 700); toast(tr('已退出漫游', 'Exited walk mode')); }
     this._syncHint();
   }
-
-  /** 把 walk 状态同步到相机 */
   _applyWalkCam(){
     const w = this.walk;
     if (!w) return;
@@ -1386,8 +1896,6 @@ export class Scene3D {
     const dir = new THREE.Vector3(-sy * cp, sp, -cy * cp);
     this.camera.lookAt(w.x + dir.x, w.y + dir.y, w.z + dir.z);
   }
-
-  /** 每帧：根据按键 / 摇杆推进位置 */
   _walkStep(dt){
     const w = this.walk;
     if (!w) return;
@@ -1397,37 +1905,28 @@ export class Scene3D {
     if (keys['s'] || keys['arrowdown'])  fwd -= 1;
     if (keys['a'] || keys['arrowleft'])  side -= 1;
     if (keys['d'] || keys['arrowright']) side += 1;
-    if (this._joy){
-      fwd  += this._joy.y;
-      side += this._joy.x;
-    }
-
+    if (this._joy){ fwd += this._joy.y; side += this._joy.x; }
     if (fwd || side){
       const len = Math.hypot(fwd, side) || 1;
       fwd /= len; side /= len;
       const sp = w.speed * (keys['shift'] ? w.runMul : 1) * dt;
       const cy = Math.cos(w.yaw), sy = Math.sin(w.yaw);
-      const fx = -sy, fz = -cy;     // 前向
-      const rx =  cy, rz = -sy;     // 右向（forward × up）
+      const fx = -sy, fz = -cy, rx = cy, rz = -sy;
       w.x += (fx * fwd + rx * side) * sp;
       w.z += (fz * fwd + rz * side) * sp;
       this._walkCollide();
     }
     this._applyWalkCam();
   }
-
-  /** 圆柱推离式墙碰撞：门洞 / 拆除段允许通过 */
   _walkCollide(){
     const w = this.walk;
     if (!w) return;
     const { plan, layout } = this.app.store.state;
-    const R = 0.28;                                   // 玩家半径（米）
+    const R = 0.28;
     const walls = plan.walls || [];
     const doors = plan.doors || [];
     const dem   = layout.demolished || [];
     const dems  = layout.demolitions || [];
-
-    /** 玩家是否位于「某门 / 拆除段」的开口内 */
     const passThrough = (px, pz, wallId) => {
       const chk = el => {
         if (el.hostWall && el.hostWall !== wallId) return false;
@@ -1444,7 +1943,6 @@ export class Scene3D {
       for (const dm of dems) if (chk(dm)) return true;
       return false;
     };
-
     for (let iter = 0; iter < 3; iter++){
       let moved = false;
       for (const wall of walls){
@@ -1477,8 +1975,6 @@ export class Scene3D {
       if (!moved) break;
     }
   }
-
-  /** E 键：开关正前方 2.2m 内的门 */
   _toggleDoorAhead(){
     const w = this.walk;
     if (!w || !this.doors.length) return;

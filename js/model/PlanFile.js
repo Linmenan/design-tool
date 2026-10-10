@@ -36,6 +36,7 @@ export function normalizePlan(p){
   return {
     bounds:  p.bounds  || base.bounds,
     origin:  p.origin  || { x:0, y:0, note:'' },
+    compass: { ...(base.compass || { north:0, lat:39.9, lng:116.4, city:'' }), ...(p.compass || {}) },
     walls:   normalizeWalls(p.walls),
     doors:   normalizeDoors(p.doors),
     windows: normalizeWindows(p.windows),

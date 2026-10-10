@@ -33,6 +33,7 @@ export class PropertyPanel {
       if (sel?.kind === 'door')       return this._doorPanel(key);
       if (sel?.kind === 'window')     return this._windowPanel(key);
       if (sel?.kind === 'room')       return this._roomPanel(key, true);
+      if (sel?.kind === 'compass')    return this._compassPanel();
       return this._editOverview();
     }
     if (sel?.kind === 'furn'){
@@ -40,6 +41,7 @@ export class PropertyPanel {
       if (f) return this._furnPanel(f);
     }
     if (sel?.kind === 'room') return this._roomPanel(sel.id, false);
+    if (sel?.kind === 'compass') return this._compassPanel();
     return this._overview();
   }
 
@@ -134,6 +136,7 @@ export class PropertyPanel {
     const mats = Object.entries(this.app.store.state.plan.mats).map(([k, m]) =>
       `<button class="mat ${k === r.mat ? 'on' : ''}" data-mat="${k}"><i style="background:${m.sw}"></i><span>${nm(m.name)}<small>¥${m.price}/m²</small></span></button>`).join('');
 
+    const lamp = r.lamp || {};
     this._html(`<section><h3>${tr('房间','Room')}</h3>
       <div class="form"><label class="full">${tr('名称','Name')}<input id="rName" value="${esc(nm(r.name))}"></label></div>
       <div class="stats" style="margin-top:10px">
@@ -142,6 +145,14 @@ export class PropertyPanel {
         <div><small>${tr('开间','Width')}</small><span class="big">${Math.round(x1-x0)}</span> mm</div>
         <div><small>${tr('进深','Depth')}</small><span class="big">${Math.round(y1-y0)}</span> mm</div></div></section>
     <section><h3>${tr('地面材料','Flooring')}</h3><div class="mats">${mats}</div></section>
+    <section><h3>${tr('顶灯','Ceiling lamp')}</h3>
+      <div class="form">
+        <label class="full"><input type="checkbox" id="lampOn" ${lamp.on !== false ? 'checked' : ''} style="width:auto"> ${tr('夜间自动开启','On at night')}</label>
+        <label>${tr('色温','Color')}<input type="color" id="lampColor" value="${lamp.color || '#ffd9a8'}"></label>
+        <label>${tr('亮度','Intensity')}<input type="number" id="lampInt" min=".2" max="2" step=".1" value="${lamp.intensity ?? 1}"></label>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:6px">${tr('顶灯安装在房间几何中心的天花板下，白天不发光，夜景时作为主光。','Installed at the room center below the ceiling. Off during day, main light at night.')}</div>
+    </section>
     ${isEdit ? '' : `<section><h3>${tr('房间内家具','Furniture')} <small>${inside.length}</small></h3>
       <table>${inside.map(f => `<tr class="click" data-fid="${f.id}"><td>${esc(nm(f.name))}</td><td class="r muted">${f.w}×${f.d}</td></tr>`).join('') || `<tr><td class="muted">${tr('暂无','None')}</td></tr>`}</table></section>`}
     <div class="actions"><button class="btn" id="back">${tr('← 返回总览','← Back')}</button></div>`);
@@ -157,6 +168,10 @@ export class PropertyPanel {
     }));
     $$('#panel tr[data-fid]').forEach(tr => tr.onclick = () => this.app.select({ kind:'furn', id:tr.dataset.fid }));
     $('#back').onclick = () => this.app.select(null);
+    const lon = $('#lampOn'), lcol = $('#lampColor'), lint = $('#lampInt');
+    if (lon)  lon.onchange  = e => store.mutate('lamp on',  s => { const t = s.plan.rooms.find(x => x.id === id); if (t){ t.lamp = t.lamp || {}; t.lamp.on = e.target.checked; } });
+    if (lcol) lcol.oninput  = e => store.mutate('lamp color', s => { const t = s.plan.rooms.find(x => x.id === id); if (t){ t.lamp = t.lamp || {}; t.lamp.color = e.target.value; } });
+    if (lint) lint.onchange = e => store.mutate('lamp int', s => { const t = s.plan.rooms.find(x => x.id === id); if (t){ t.lamp = t.lamp || {}; t.lamp.intensity = Math.max(.2, Math.min(2, +e.target.value || 1)); } });
   }
 
   /* ============ 编辑阶段 ============ */
@@ -172,10 +187,11 @@ export class PropertyPanel {
       </div>
       <div class="muted" style="font-size:12px;margin-top:8px">${tr('当前原点','Origin')} <b>(${o.x}, ${o.y})</b> mm</div>
     </section>
-    <section><h3>${tr('基准点','Origin')}</h3>
+    <section><h3>${tr('基准点 / 罗盘','Origin / Compass')}</h3>
       <div class="actions">
         <button class="btn" id="orgCursor">${tr('以光标点为原点','Set origin to cursor')}</button>
         <button class="btn" id="orgReset">${tr('重置原点 (0,0)','Reset origin')}</button>
+        <button class="btn" id="editCompass">${tr('指南针 / 位置','Compass / Location')}</button>
       </div></section>
     <section><h3>${tr('操作提示','Tips')}</h3>
       <div class="kbd">
@@ -192,6 +208,38 @@ export class PropertyPanel {
     };
     const orgReset = $('#orgReset');
     if (orgReset) orgReset.onclick = () => this.app.view2d.setOrigin(0, 0, '');
+    const ec = $('#editCompass');
+    if (ec) ec.onclick = () => this.app.select({ kind:'compass' });
+  }
+
+  /* ---- 指南针 / 位置面板 ---- */
+  _compassPanel(){
+    const { plan } = this.app.store.state;
+    const c = plan.compass || { north:0, lat:39.9, lng:116.4, city:'北京' };
+    this._html(`<section><h3>${tr('指南针与位置','Compass & Location')}</h3>
+      <div class="form">
+        <label>${tr('北向角度','North angle')} (°)<input type="number" id="cpNorth" value="${c.north||0}" step="5" min="0" max="359"></label>
+        <label>${tr('纬度','Latitude')} (°)<input type="number" id="cpLat" value="${c.lat ?? 39.9}" step=".1" min="-89" max="89"></label>
+        <label>${tr('经度','Longitude')} (°)<input type="number" id="cpLng" value="${c.lng ?? 116.4}" step=".1" min="-180" max="180"></label>
+        <label class="full">${tr('城市名（可选）','City (optional)')}<input id="cpCity" value="${esc(c.city||'')}"></label>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:8px">${tr('北向角度：0° = 画布上方为正北，顺时针为正；用于 3D 中精确计算太阳方位与高度。','0° = up is north, clockwise positive. Used for accurate sun position in 3D.')}</div>
+      <div class="actions">
+        <button class="btn" id="cpReset">${tr('恢复默认','Reset')}</button>
+        <button class="btn" id="cpBack">${tr('← 返回','← Back')}</button>
+      </div></section>`);
+    const store = this.app.store;
+    const upd = () => {
+      const north = ((+$('#cpNorth').value || 0) % 360 + 360) % 360;
+      const lat = Math.max(-89, Math.min(89, +$('#cpLat').value || 39.9));
+      const lng = Math.max(-180, Math.min(180, +$('#cpLng').value || 116.4));
+      const city = $('#cpCity').value.trim();
+      store.mutate('edit compass', s => { s.plan.compass = { north, lat, lng, city }; });
+    };
+    ['#cpNorth','#cpLat','#cpLng'].forEach(id => $(id).onchange = upd);
+    $('#cpCity').onchange = upd;
+    $('#cpReset').onclick = () => store.mutate('reset compass', s => { s.plan.compass = { north:0, lat:39.9, lng:116.4, city:'北京' }; });
+    $('#cpBack').onclick = () => this.app.select(null);
   }
 
   _wallPanel(key){
