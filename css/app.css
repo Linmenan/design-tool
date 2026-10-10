@@ -350,6 +350,79 @@ main.drawer-panel #fab{opacity:0;visibility:hidden}
   .rlabel3d{font-size:13px;padding:3px 10px}
 }
 
+/* ---------- 3D 模式下隐藏 2D 罗盘 ---------- */
+body.m3d #compass2d{ display: none !important; }
+
+/* ---------- 3D 夜景灯光中控 fab（左上角，原罗盘位置） ---------- */
+#lightFab{
+  position: absolute; left: 14px; top: 14px;
+  z-index: 6;
+  display: none;
+  font-family: inherit;
+  pointer-events: auto;
+}
+body.m3d.night-on #lightFab{ display: block; }
+
+#lightFab .lf-btn{
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 14px; border-radius: 22px;
+  background: rgba(43,40,36,.86); color: #fff;
+  border: 0; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,.28);
+  font-size: 13px; line-height: 1;
+  transition: background .15s, transform .15s;
+}
+#lightFab .lf-btn:hover{ background: rgba(43,40,36,.96); }
+#lightFab .lf-btn:active{ transform: scale(.97); }
+#lightFab .lf-icon{ font-size: 15px; }
+
+#lightFab .lf-panel{
+  position: absolute; left: 0; top: calc(100% + 8px);
+  width: 300px; max-width: calc(100vw - 24px);
+  background: #fff; border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(40,30,20,.18);
+  display: none; flex-direction: column;
+  animation: fadeIn .18s ease;
+}
+#lightFab.open .lf-panel{ display: flex; }
+
+#lightFab .lp-header{
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line);
+}
+#lightFab .lp-count{
+  flex: 1; font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+#lightFab .lp-header .btn.chip{ font-size: 12px; padding: 4px 10px; }
+#lightFab .lp-list{ overflow-y: auto; max-height: 340px; padding: 4px; }
+#lightFab .lp-row{
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  user-select: none;
+}
+#lightFab .lp-row:hover{ background: #f7f1e8; }
+#lightFab .lp-row input[type=checkbox]{
+  margin: 0; width: 16px; height: 16px;
+  accent-color: var(--accent); cursor: pointer;
+}
+#lightFab .lp-name{
+  flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#lightFab .lp-empty{
+  padding: 16px 12px; text-align: center;
+  color: var(--muted); font-size: 12px;
+}
+
+@media (pointer:coarse){
+  #lightFab{ left: 10px; top: 10px; }
+  #lightFab .lf-btn{ padding: 10px 16px; font-size: 14px; }
+  #lightFab .lf-panel{ width: min(340px, calc(100vw - 20px)); }
+  #lightFab .lp-row{ padding: 10px; font-size: 14px; }
+  #lightFab .lp-row input[type=checkbox]{ width: 20px; height: 20px; }
+}
+
 /* ---------- 灯光中控面板 ---------- */
 #lightMenu > summary{font-weight:500}
 .light-panel{

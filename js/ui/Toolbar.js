@@ -240,6 +240,9 @@ export class Toolbar {
     if (lpOn)  lpOn.onclick  = e => { e.preventDefault(); e.stopPropagation(); this._allLamps(true); };
     if (lpOff) lpOff.onclick = e => { e.preventDefault(); e.stopPropagation(); this._allLamps(false); };
 
+    // 灯光中控 fab（挂到 #view3d 左上角，3D 夜景下才显示）
+    this._mountLightFab();
+
     // 全屏
     $('#fullscreen') && ($('#fullscreen').onclick = () => this._toggleFullscreen());
 
@@ -276,15 +279,72 @@ export class Toolbar {
       seg.querySelectorAll('.btn').forEach(b => b.classList.toggle('on', (b.dataset.stage === 'edit') === isEdit));
     }
 
+    /* 3D 夜景下显示灯光 fab；其他模式一律隐藏 */
+    const is3d = app.view.mode === '3d';
+    const isNight = !!(app.view3d?.opt?.night);
+    document.body.classList.toggle('night-on', is3d && isNight);
+
     /* 灯光中控面板：数据变化时同步刷新（开关状态、灯的数量） */
     this._syncLightPanel();
   }
 
-  /** 刷新灯光面板中的灯列表 */
+  /** 挂载 3D 场景左上角的灯光中控 fab（原罗盘位置） */
+  _mountLightFab(){
+    /* 移除旧版放在顶部工具栏里的灯光菜单（如果存在） */
+    const oldMenu = document.getElementById('lightMenu');
+    if (oldMenu && oldMenu.parentNode) oldMenu.parentNode.removeChild(oldMenu);
+
+    /* 已挂载过就不重复创建 */
+    if (document.getElementById('lightFab')) return;
+    const host = document.getElementById('view3d');
+    if (!host) return;
+
+    const el = document.createElement('div');
+    el.id = 'lightFab';
+    el.innerHTML = `
+      <button class="lf-btn" id="lfToggle" type="button">
+        <span class="lf-icon">💡</span>
+        <span class="lf-label" id="lfLabel">${tr('灯光','Lights')}</span>
+      </button>
+      <div class="lf-panel">
+        <div class="lp-header">
+          <span class="lp-count" id="lpCount"></span>
+          <button class="btn chip" id="lpOnAll"  type="button">${tr('全开','All on')}</button>
+          <button class="btn chip" id="lpOffAll" type="button">${tr('全关','All off')}</button>
+        </div>
+        <div class="lp-list" id="lpList"></div>
+      </div>`;
+    host.appendChild(el);
+
+    /* 按钮切换展开 / 折叠 */
+    el.querySelector('#lfToggle').onclick = e => {
+      e.stopPropagation();
+      el.classList.toggle('open');
+    };
+    /* 全开 / 全关 */
+    el.querySelector('#lpOnAll').onclick  = e => { e.stopPropagation(); this._allLamps(true);  };
+    el.querySelector('#lpOffAll').onclick = e => { e.stopPropagation(); this._allLamps(false); };
+
+    /* 点击面板外部时自动折叠 */
+    document.addEventListener('pointerdown', e => {
+      if (!el.classList.contains('open')) return;
+      if (el.contains(e.target)) return;
+      el.classList.remove('open');
+    });
+  }
+
+  /**
+   * 刷新灯光面板中的灯列表。
+   * 显示名称由"所属房间 + 灯具类型"智能生成：
+   *   [房间名]_[灯具类型]_[idx]
+   * 其中 idx 只在同一房间内出现多盏同类型灯时才附加（从 1 开始）。
+   * 不属于任何房间的灯归类到「室外」。
+   */
   _syncLightPanel(){
     const list = $('#lpList'), cnt = $('#lpCount');
     if (!list) return;                    // 当前不在 layout 阶段
-    const furn = this.app.store.state.layout.furniture || [];
+    const s = this.app.store.state;
+    const furn = s.layout.furniture || [];
     const lamps = furn.filter(f => CEILING_TYPES.has(f.type));
     const onN = lamps.filter(f => (f.lamp?.on) !== false).length;
     if (cnt) cnt.textContent = lamps.length ? `${onN}/${lamps.length} ${tr('亮','on')}` : '';
@@ -293,13 +353,41 @@ export class Toolbar {
       list.innerHTML = `<div class="lp-empty">${tr('暂无灯具，从左侧「灯具」分类拖入','No lights. Drag one from the Lights category.')}</div>`;
       return;
     }
-    list.innerHTML = lamps.map(f => {
+
+    /* ① 计算每盏灯的所属房间 */
+    const rooms = s.plan.rooms || [];
+    const roomOf = f => {
+      for (const r of rooms){
+        if (r.poly && this._pointInPoly(f.cx, f.cy, r.poly)) return r.name || tr('房间','Room');
+      }
+      return tr('室外','Outside');
+    };
+
+    /* ② 生成基础名（房间_类型） */
+    const baseNames = lamps.map(f => {
+      const room = roomOf(f);
+      const typeName = nm(f.name) || nm(f.type);   // 优先用户自定义名；否则库中默认名
+      return `${room}_${typeName}`;
+    });
+
+    /* ③ 同名计数：只有 >1 才追加 _idx */
+    const countMap = new Map();
+    baseNames.forEach(b => countMap.set(b, (countMap.get(b) || 0) + 1));
+    const idxMap = new Map();
+    const displayNames = baseNames.map(b => {
+      if (countMap.get(b) <= 1) return b;
+      const i = (idxMap.get(b) || 0) + 1;
+      idxMap.set(b, i);
+      return `${b}_${i}`;
+    });
+
+    /* ④ 渲染列表 */
+    list.innerHTML = lamps.map((f, i) => {
       const on = (f.lamp?.on) !== false;
-      const name = nm(f.name) || nm(f.type);
-      return `<label class="lp-row" data-id="${f.id}">
+      const display = displayNames[i];
+      return `<label class="lp-row" data-id="${f.id}" title="${esc(display)}">
         <input type="checkbox" ${on ? 'checked' : ''}>
-        <span class="lp-name" title="${esc(name)}">${esc(name)}</span>
-        <small class="lp-type">${esc(nm(f.type))}</small>
+        <span class="lp-name">${esc(display)}</span>
       </label>`;
     }).join('');
 
@@ -314,6 +402,18 @@ export class Toolbar {
         });
       };
     });
+  }
+
+  /** 点在多边形内（射线法）；用于判断灯具属于哪个房间 */
+  _pointInPoly(px, py, poly){
+    let inside = false;
+    const n = poly.length;
+    for (let i = 0, j = n - 1; i < n; j = i++){
+      const xi = poly[i][0], yi = poly[i][1];
+      const xj = poly[j][0], yj = poly[j][1];
+      if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+    }
+    return inside;
   }
 
   /** 全开 / 全关：一次性修改所有灯的 on 开关 */

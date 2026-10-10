@@ -2218,7 +2218,11 @@ export class Scene3D {
       this.labelG.visible = !!this.opt.labels;
       this.labelG.children.forEach(o => { o.visible = !!this.opt.labels; });
     }
-    if (key === 'night') this._applyLight();
+    if (key === 'night'){
+      this._applyLight();
+      /* 通知工具栏刷新：3D 夜景 → 显示灯光中控 fab；白天 → 隐藏 */
+      this.app.toolbar?.sync();
+    }
   }
   setHour(v){ this.opt.hour = Math.max(0, Math.min(24, +v || 0)); this._applyLight(); }
   setDate(m, d){
