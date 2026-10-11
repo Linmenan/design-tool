@@ -1,5 +1,23 @@
 {
   "dependencies": {
     "three": "^0.160.0"
-  }
+  },
+  "name": "design-tool",
+  "description": "[中文](README.md) | English",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Linmenan/design-tool.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Linmenan/design-tool/issues"
+  },
+  "homepage": "https://github.com/Linmenan/design-tool#readme"
 }

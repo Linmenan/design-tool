@@ -37,6 +37,7 @@ export class PropertyPanel {
       if (sel?.kind === 'window')     return this._windowPanel(key);
       if (sel?.kind === 'room')       return this._roomPanel(key, true);
       if (sel?.kind === 'compass')    return this._compassPanel();
+      if (sel?.kind === 'refImage')   return this._refImagePanel();
       return this._editOverview();
     }
     if (sel?.kind === 'furn'){
@@ -329,6 +330,70 @@ export class PropertyPanel {
       if (window.__activeCityPicker){ try { window.__activeCityPicker.destroy(); } catch {} }
       this.app.select(null);
     };
+  }
+
+  /* ---- 参考户型图面板 ---- */
+  _refImagePanel(){
+    const ref = this.app.store.state.plan.refImage;
+    if (!ref) return this._editOverview();
+    const locked = !!ref.locked;
+    this._html(`<section><h3>${tr('参考户型图','Reference Image')}</h3>
+      <div class="form">
+        <label class="full">${tr('名称','Name')}<input id="refName" value="${esc(ref.name || '')}"></label>
+        <label>X (mm)<input type="number" id="refX" value="${Math.round(ref.x)}" step="10" ${locked ? 'disabled' : ''}></label>
+        <label>Y (mm)<input type="number" id="refY" value="${Math.round(ref.y)}" step="10" ${locked ? 'disabled' : ''}></label>
+        <label>${tr('宽','Width')} (mm)<input type="number" id="refW" value="${Math.round(ref.w)}" min="50" step="10" ${locked ? 'disabled' : ''}></label>
+        <label>${tr('高','Height')} (mm)<input type="number" id="refH" value="${Math.round(ref.h)}" min="50" step="10" ${locked ? 'disabled' : ''}></label>
+        <label class="full">${tr('透明度','Opacity')}<input type="range" id="refOp" min="0.05" max="1" step="0.05" value="${ref.opacity ?? 0.5}" style="accent-color:var(--edit)"></label>
+        <label class="full"><input type="checkbox" id="refLock" ${locked ? 'checked' : ''} style="width:auto"> ${tr('锁定参考图（防止误拖）','Lock the image (prevent accidental dragging)')}</label>
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:8px">${tr(
+        '拖动图片可移动；拖动四角可保持宽高比缩放；滚轮缩放 / Ctrl+滚轮微调；使用「两点标定」按图上尺寸自动匹配比例。',
+        'Drag to move; drag corners to scale; wheel / Ctrl+wheel to zoom; use "Calibrate" to match the real-world scale.')}</div>
+      <div class="actions">
+        <button class="btn" id="refCalBtn" ${locked ? 'disabled' : ''}>${tr('两点标定尺寸','Calibrate (2 points)')}</button>
+        <button class="btn" id="refFitBtn" ${locked ? 'disabled' : ''}>${tr('按原图比例适配','Fit to original aspect')}</button>
+        <button class="btn danger" id="refDel">${tr('移除参考图','Remove')}</button>
+        <button class="btn" id="back">${tr('← 返回','← Back')}</button>
+      </div></section>`);
+
+    const store = this.app.store;
+    const upd = fn => store.mutate('edit ref image', s => { if (s.plan.refImage) fn(s.plan.refImage); });
+
+    $('#refName').onchange = e => upd(r => r.name = e.target.value.trim() || r.name);
+    $('#refX').onchange = e => { const v = parseFloat(e.target.value); if (!isNaN(v)) upd(r => r.x = v); };
+    $('#refY').onchange = e => { const v = parseFloat(e.target.value); if (!isNaN(v)) upd(r => r.y = v); };
+    /* 改宽 / 改高都保持宽高比（否则图片会变形） */
+    $('#refW').onchange = e => {
+      const v = Math.max(50, parseFloat(e.target.value) || 50);
+      upd(r => { const k = v / r.w; r.w = v; r.h *= k; });
+    };
+    $('#refH').onchange = e => {
+      const v = Math.max(50, parseFloat(e.target.value) || 50);
+      upd(r => { const k = v / r.h; r.h = v; r.w *= k; });
+    };
+    $('#refOp').oninput = e => upd(r => r.opacity = Math.max(0.05, Math.min(1, +e.target.value)));
+    $('#refLock').onchange = e => upd(r => r.locked = e.target.checked);
+
+    $('#refCalBtn').onclick = () => {
+      this.app.select(null);
+      this.app.view2d.startRefCalibrate();
+    };
+    $('#refFitBtn').onclick = () => upd(r => {
+      if (r.naturalW && r.naturalH) r.h = r.w * r.naturalH / r.naturalW;
+    });
+    $('#refDel').onclick = () => {
+      if (!confirm(tr('移除参考户型图？', 'Remove the reference image?'))) return;
+      this.app.select(null);
+      /* 退出参考图编辑模式，避免按钮残留 */
+      if (this.app.view2d?.refEditMode){
+        this.app.view2d.refEditMode = false;
+        this.app.view2d._syncRefEditBtn();
+        document.body.classList.remove('ref-edit-mode');
+      }
+      store.mutate('remove ref image', s => { s.plan.refImage = null; });
+    };
+    $('#back').onclick = () => this.app.select(null);
   }
 
   _wallPanel(key){

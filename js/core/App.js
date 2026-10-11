@@ -121,7 +121,7 @@ export class App {
       tool: 'select',
       sel: null,
       mA: null, mCur: null,
-      layers: { dims:true, autoDims:false, labels:true, furn:true, lamps:true, grid:false, bearing:false, wallSnap:true },
+      layers: { dims:true, autoDims:false, labels:true, furn:true, lamps:true, grid:false, bearing:false, wallSnap:true, refImage:true },
     };
     this._radialActive = null;
   }
@@ -270,6 +270,46 @@ export class App {
       });
     }
 
+    /* ---- 参考户型图导入 ---- */
+    const refImgIn = document.getElementById('refImgIn');
+    if (refImgIn){
+      refImgIn.addEventListener('change', async e => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        try {
+          const { dataUrl, naturalW, naturalH } = await this._readAndCompressImage(file);
+          const w0 = 1500;
+          const h0 = naturalW > 0 ? w0 * naturalH / naturalW : w0;
+          const vp = this.viewport;
+          const cx = vp.x0 + vp.W / 2 / vp.s;
+          const cy = vp.y0 + vp.H / 2 / vp.s;
+          this.store.mutate('import ref image', s => {
+            s.plan.refImage = {
+              src: dataUrl,
+              name: file.name,
+              x: Math.round(cx - w0 / 2),
+              y: Math.round(cy - h0 / 2),
+              w: Math.round(w0),
+              h: Math.round(h0),
+              naturalW, naturalH,
+              opacity: 0.5,
+              locked: false,
+            };
+          });
+          this.ui.layers.refImage = true;
+          this.toolbar?.sync();
+          this.select({ kind: 'refImage' });
+          this.view2d?.renderAll();
+          toast(tr('已导入参考图，可拖拽 / 缩放 / 两点标定', 'Reference image imported'));
+        } catch (err){
+          console.error('[refImg]', err);
+          toast(tr('参考图读取失败：', 'Failed to read image: ') + (err?.message || err));
+        } finally {
+          e.target.value = '';
+        }
+      });
+    }
+
     /* ---- 全局快捷键 ---- */
     window.addEventListener('keydown', e => {
       // 在输入框里不拦截（允许浏览器原生的输入撤销 / 键入）
@@ -309,6 +349,43 @@ export class App {
         this.setTool(tool);
       }
     });
+  }
+
+  /* ---- 参考图读取与压缩：防止原图过大导致 localStorage / JSON 爆掉 ---- */
+  _readFileAsDataURL(file){
+    return new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(fr.result);
+      fr.onerror = rej;
+      fr.readAsDataURL(file);
+    });
+  }
+  _loadImage(src){
+    return new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => res(img);
+      img.onerror = rej;
+      img.src = src;
+    });
+  }
+  /** 读入图片并压缩到长边 ≤ maxDim、JPEG 质量 quality；小图直接返回原样 */
+  async _readAndCompressImage(file, maxDim = 2000, quality = 0.85){
+    const dataUrl = await this._readFileAsDataURL(file);
+    const img = await this._loadImage(dataUrl);
+    const nw = img.naturalWidth, nh = img.naturalHeight;
+    if (nw <= maxDim && nh <= maxDim && dataUrl.length < 2e6){
+      return { dataUrl, naturalW: nw, naturalH: nh };
+    }
+    const ratio = Math.min(1, maxDim / Math.max(nw, nh));
+    const w = Math.round(nw * ratio), h = Math.round(nh * ratio);
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext('2d');
+    // 户型参考图一般无透明通道，先铺白底，避免 JPEG 黑底
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(img, 0, 0, w, h);
+    const out = cv.toDataURL('image/jpeg', quality);
+    return { dataUrl: out, naturalW: w, naturalH: h };
   }
 
   /* ============================================================

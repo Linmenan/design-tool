@@ -37,6 +37,7 @@ export class PlanView {
 
     this._cursorEl = document.getElementById('toolCursor');
     this._radialTimer = null;
+    this.refEditMode = false;        // 参考图编辑模式：只有此时参考图才可选中/编辑
 
     this.editor = {
       wallKind: 'n',
@@ -60,6 +61,12 @@ export class PlanView {
     this.rebuildDefs();
     this.renderAll();
     this.setTool('select');
+
+    /* 参考图编辑按钮（右上角） */
+    const refBtn = document.getElementById('refEditBtn');
+    if (refBtn) refBtn.onclick = () => this.toggleRefEdit();
+    this._syncRefEditBtn();
+
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
     for (let i = 0; i < 60 && !this.vp.fit(this.app.store.state.plan.bounds); i++){
       await new Promise(r => requestAnimationFrame(r));
@@ -78,10 +85,64 @@ export class PlanView {
     this._stage = stage;
     const hud = $('#editHud');
     if (hud) hud.style.display = stage === 'edit' ? 'flex' : 'none';
+    /* 切出编辑阶段 → 自动退出参考图编辑 */
+    if (stage !== 'edit' && this.refEditMode){
+      this.refEditMode = false;
+      this.app.select(null);
+    }
+    this._syncRefEditBtn();
     this.renderAll();
   }
 
   get isEdit(){ return this._stage === 'edit'; }
+
+  /* ---- 参考图编辑模式 ---- */
+  toggleRefEdit(){
+    if (!this.isEdit){
+      toast(tr('请先切换到「户型编辑」阶段', 'Switch to Plan Edit stage first'));
+      return;
+    }
+    const ref = this.app.store.state.plan.refImage;
+    if (!ref){
+      toast(tr('请先在「文件 → 导入参考户型图」中导入图片', 'Import a reference image first'));
+      return;
+    }
+    this.refEditMode = !this.refEditMode;
+
+    if (this.refEditMode){
+      // 进入：切到 select 工具、打开参考图图层、选中参考图
+      this.app.setTool('select');
+      this.app.ui.layers.refImage = true;
+      this.app.toolbar?.sync();
+      this.app.select({ kind: 'refImage' });
+      document.body.classList.add('ref-edit-mode');
+      const h = $('#modehint');
+      if (h){
+        h.textContent = tr('参考图编辑模式：只能操作参考图，点击右上角按钮退出',
+                          'Reference image edit mode: only the reference image can be edited');
+        h.classList.add('show');
+      }
+    } else {
+      this.app.select(null);
+      document.body.classList.remove('ref-edit-mode');
+      this.syncModeHint();
+    }
+    this._syncRefEditBtn();
+    this.renderAll();
+  }
+
+  /** 按钮文字 / 高亮 / 显隐 */
+  _syncRefEditBtn(){
+    const btn = document.getElementById('refEditBtn');
+    if (!btn) return;
+    const hasRef = !!this.app.store.state.plan.refImage;
+    btn.hidden = !this.isEdit || !hasRef;
+    btn.classList.toggle('on', this.refEditMode);
+    btn.textContent = this.refEditMode
+      ? tr('退出参考图编辑', 'Exit ref edit')
+      : tr('参考图编辑', 'Edit ref image');
+    document.body.classList.toggle('ref-edit-mode', !!(this.refEditMode && this.isEdit));
+  }
 
   /* =========================== defs =========================== */
   rebuildDefs(){
@@ -109,7 +170,7 @@ export class PlanView {
 
   /* =========================== 渲染 =========================== */
   renderAll(){
-    const steps = ['renderGrid','renderRooms','renderFurn','renderWalls','renderOpenings','renderLabels','renderDims','renderMeasure','renderSel','renderCompass','syncScalebar','syncFooter','syncEditHud'];
+    const steps = ['renderGrid','renderRooms','renderRef','renderFurn','renderWalls','renderOpenings','renderLabels','renderDims','renderMeasure','renderSel','renderCompass','syncScalebar','syncFooter','syncEditHud'];
     for (const name of steps){
       try { this[name](); } catch (e) { console.error('[PV] ' + name + ' 失败:', e); }
     }
@@ -138,6 +199,40 @@ export class PlanView {
     (plan.doors || []).forEach(d => s += sill(d));
     (plan.windows || []).forEach(w => s += sill(w));
     $('#gRooms').innerHTML = s;
+  }
+
+  /* ---- 参考户型图（底图）---- */
+  renderRef(){
+    const g = $('#gRef');
+    if (!g) return;
+    const ref = this.app.store.state.plan.refImage;
+    if (!ref || !this.app.ui.layers.refImage){
+      g.setAttribute('display', 'none');
+      g.innerHTML = '';
+      return;
+    }
+    g.setAttribute('display', 'inline');
+    const op = Math.max(0.05, Math.min(1, ref.opacity ?? 0.5));
+    const esc = s => String(s).replace(/"/g, '&quot;');
+    g.innerHTML = `<image href="${esc(ref.src)}" x="${ref.x}" y="${ref.y}" width="${ref.w}" height="${ref.h}" opacity="${op}" preserveAspectRatio="none" pointer-events="none"/>`;
+  }
+
+  /* ---- 两点标定的临时图层 ---- */
+  renderRefCalibrate(){
+    const g = $('#gEdit');
+    if (!g) return;
+    if (!this._refCalibrate){ return; }
+    const k = 1 / vpSafe(this.vp.s);
+    const R = 6 * k;
+    const pts = this._refCalibrate.pts || [];
+    let s = '';
+    pts.forEach(pt => {
+      s += `<circle cx="${pt.x}" cy="${pt.y}" r="${R}" fill="#b5653a" stroke="#fff" stroke-width="1.5" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+    });
+    if (pts.length === 2){
+      s += `<line x1="${pts[0].x}" y1="${pts[0].y}" x2="${pts[1].x}" y2="${pts[1].y}" stroke="#b5653a" stroke-width="1.5" stroke-dasharray="5 3" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+    }
+    g.innerHTML = s;
   }
 
   renderFurn(){
@@ -620,6 +715,20 @@ export class PlanView {
           s += `<circle cx="${mx}" cy="${my}" r="${R * 0.7}" fill="#fff" stroke="#b5653a" stroke-width="1.2" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
         }
       }
+    } else if (sel?.kind === 'refImage' && this.refEditMode && this.app.ui.layers.refImage){
+      const ref = this.app.store.state.plan.refImage;
+      if (ref){
+        const k = 1/vpSafe(this.vp.s);
+        const R = 6 * k, HIT = 16 * k;
+        const x0 = ref.x, y0 = ref.y, x1 = ref.x + ref.w, y1 = ref.y + ref.h;
+        s += `<rect x="${x0}" y="${y0}" width="${ref.w}" height="${ref.h}" fill="none" stroke="#b5653a" stroke-width="1.5" stroke-dasharray="6 4" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+        if (!ref.locked){
+          [['nw', x0, y0], ['ne', x1, y0], ['se', x1, y1], ['sw', x0, y1]].forEach(([corner, x, y]) => {
+            s += `<circle data-handle="ref-corner" data-corner="${corner}" cx="${x}" cy="${y}" r="${HIT}" fill="transparent" style="cursor:${corner === 'nw' || corner === 'se' ? 'nwse-resize' : 'nesw-resize'}"/>`;
+            s += `<rect x="${x - R}" y="${y - R}" width="${2*R}" height="${2*R}" fill="#fff" stroke="#b5653a" stroke-width="1.5" vector-effect="non-scaling-stroke" pointer-events="none"/>`;
+          });
+        }
+      }
     } else if (sel?.kind === 'furn' && !this.isEdit){
       const f = this.app.store.getFurniture(sel.id);
       if (f){
@@ -720,6 +829,11 @@ export class PlanView {
       this.app.ui.mA = null;
       this.app.ui.mCur = null;
       this.renderMeasure();
+    }
+    // 切换工具时退出两点标定
+    if (changing && this._refCalibrate){
+      this._refCalibrate = null;
+      const g = $('#gEdit'); if (g) g.innerHTML = '';
     }
     this.app.ui.tool = t;
     this.svg.setAttribute('class', 'tool-' + t);
@@ -888,6 +1002,33 @@ export class PlanView {
     return best;
   }
 
+  /** 点 p 是否落在参考图矩形内；只在参考图编辑模式下返回非 null */
+  hitRefImage(p){
+    if (!this.refEditMode) return null;               // ← 关键：非编辑模式下不可选中
+    const ref = this.app.store.state.plan.refImage;
+    if (!ref || !this.app.ui.layers.refImage) return null;
+    const x0 = Math.min(ref.x, ref.x + ref.w), x1 = Math.max(ref.x, ref.x + ref.w);
+    const y0 = Math.min(ref.y, ref.y + ref.h), y1 = Math.max(ref.y, ref.y + ref.h);
+    if (p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1) return ref;
+    return null;
+  }
+
+  /* ---- 进入 / 退出两点标定模式 ---- */
+  startRefCalibrate(){
+    if (!this.refEditMode){
+      toast(tr('请先点击右上角「参考图编辑」按钮', 'Enter reference image edit mode first'));
+      return;
+    }
+    const ref = this.app.store.state.plan.refImage;
+    if (!ref){ toast(tr('请先导入参考图', 'Import a reference image first')); return; }
+    if (ref.locked){ toast(tr('参考图已锁定，请先解锁', 'Reference image is locked')); return; }
+    this._refCalibrate = { pts: [] };
+    this.svg.style.cursor = 'crosshair';
+    const h = $('#modehint');
+    if (h){ h.textContent = tr('在参考图上依次点击两个已知距离的点', 'Click two points with a known distance on the reference image'); h.classList.add('show'); }
+    const g = $('#gEdit'); if (g) g.innerHTML = '';
+  }
+
   /* =========================== 交互 =========================== */
   _bind(){
     const svg = this.svg;
@@ -953,6 +1094,29 @@ export class PlanView {
     ['gesturestart','gesturechange','gestureend'].forEach(t => document.addEventListener(t, e => e.preventDefault()));
 
     svg.addEventListener('wheel', e => {
+      /* 参考图选中时：滚轮缩放参考图（大跨度）/ Ctrl+滚轮微调；
+         否则按原逻辑缩放画布。 */
+      const sel = this.app.ui.sel;
+      const ref = this.app.store.state.plan.refImage;
+      if (sel?.kind === 'refImage' && this.refEditMode && ref && this.app.ui.layers.refImage && !ref.locked){
+        e.preventDefault();
+        const p = this.vp.toMM(e);
+        const k = Math.exp(-e.deltaY * (e.ctrlKey ? 0.0008 : 0.003));
+        const newW = Math.max(50, ref.w * k);
+        const newH = Math.max(50, ref.h * k);
+        const ax = (p.x - ref.x) / ref.w;
+        const ay = (p.y - ref.y) / ref.h;
+        ref.w = newW; ref.h = newH;
+        ref.x = p.x - newW * ax;
+        ref.y = p.y - newH * ay;
+        this.renderRef(); this.renderSel();
+        /* 去抖持久化：连续缩放期间不写 localStorage，停止 300ms 后落盘一次 */
+        clearTimeout(this._refPersistT);
+        this._refPersistT = setTimeout(() => {
+          try { this.app.store._persist(); } catch {}
+        }, 300);
+        return;
+      }
       e.preventDefault();
       const r = svg.getBoundingClientRect();
       this.vp.zoomAt(this.vp.s * Math.exp(-e.deltaY * (e.ctrlKey ? .01 : .0015)), e.clientX - r.left, e.clientY - r.top);
@@ -1034,6 +1198,36 @@ export class PlanView {
   _pointerDown(e){
     const p = this.vp.toMM(e), t = e.target;
     const tool = this.app.ui.tool;
+
+    /* ---- 两点标定模式：优先拦截点击 ---- */
+    if (this._refCalibrate){
+      this._refCalibrate.pts.push({ x: p.x, y: p.y });
+      this.renderRefCalibrate();
+      if (this._refCalibrate.pts.length === 2){
+        const [a, b] = this._refCalibrate.pts;
+        const d = Math.hypot(b.x - a.x, b.y - a.y);
+        const input = prompt(
+          tr(`请输入这两点的真实尺寸（毫米 mm）\n图上当前长度约 ${Math.round(d)} mm`,
+             `Enter the real-world distance between these two points (mm)\nCurrent on-plan length ≈ ${Math.round(d)} mm`),
+          '1000');
+        if (input && Number(input) > 0 && d > 1){
+          const k = Number(input) / d;
+          this.app.store.mutate('calibrate ref image', s => {
+            const ref = s.plan.refImage;
+            if (!ref) return;
+            const cx = ref.x + ref.w / 2, cy = ref.y + ref.h / 2;
+            ref.w *= k; ref.h *= k;
+            ref.x = cx - ref.w / 2; ref.y = cy - ref.h / 2;
+          });
+          toast(tr('已按真实尺寸校准', 'Calibrated to real-world scale'));
+        }
+        this._refCalibrate = null;
+        this.svg.style.cursor = 'default';
+        const g = $('#gEdit'); if (g) g.innerHTML = '';
+        this.syncModeHint();
+      }
+      return;
+    }
 
     if (tool === 'measure'){
       const q = this.snapPoint(p, e.shiftKey, this.app.ui.mA);
@@ -1154,6 +1348,47 @@ export class PlanView {
       return;
     }
 
+    /* ---- 参考图编辑模式：只允许操作参考图，其他交互一律落空 ---- */
+    if (tool === 'select' && this.refEditMode){
+      /* 四角控制点优先 */
+      const h0 = t.closest && t.closest('[data-handle]');
+      if (h0?.dataset.handle === 'ref-corner' && this.app.ui.sel?.kind === 'refImage' && this.app.ui.layers.refImage){
+        const ref = this.app.store.state.plan.refImage;
+        if (ref && !ref.locked){
+          this.drag = {
+            kind: 'ref-corner', corner: h0.dataset.corner,
+            sx: e.clientX, sy: e.clientY,
+            before: this.app.store.snapshot(), moved: false,
+            _ref: { x: ref.x, y: ref.y, w: ref.w, h: ref.h },
+          };
+          try { this.svg.setPointerCapture(e.pointerId); } catch {}
+          return;
+        }
+      }
+      /* 图片内部 → 选中 + 拖动 */
+      if (this.app.ui.layers.refImage){
+        const ref = this.hitRefImage(p);
+        if (ref){
+          this.app.select({ kind: 'refImage' });
+          if (!ref.locked){
+            this.drag = {
+              kind: 'ref-move',
+              sx: e.clientX, sy: e.clientY,
+              before: this.app.store.snapshot(), moved: false,
+              ox: p.x - ref.x, oy: p.y - ref.y,
+            };
+            try { this.svg.setPointerCapture(e.pointerId); } catch {}
+          }
+          return;
+        }
+      }
+      /* 其他区域 → 取消选中参考图，走 pan（不选中任何其他对象） */
+      this.app.select(null);
+      this.drag = { kind: 'pan', sx: e.clientX, sy: e.clientY, x0: this.vp.x0, y0: this.vp.y0, moved: false };
+      try { this.svg.setPointerCapture(e.pointerId); } catch {}
+      return;
+    }
+
     if (tool === 'select' && !this.isEdit && t.closest('[data-fid]')){
       const f = this.app.store.getFurniture(t.closest('[data-fid]').dataset.fid);
       if (this.app.ui.sel?.id !== f.id) this.app.select({ kind:'furn', id:f.id });
@@ -1255,6 +1490,16 @@ export class PlanView {
     }
 
     if (!this.drag){
+      /* 参考图光标：悬停在图片上或已选中时显示 move */
+      if (this.app.ui.layers.refImage){
+        const ref = this.app.store.state.plan.refImage;
+        const onRef = ref && this.hitRefImage(p);
+        if (this.app.ui.sel?.kind === 'refImage' || onRef){
+          this.svg.style.cursor = ref?.locked ? 'default' : 'move';
+        } else if (this.svg.style.cursor === 'move'){
+          this.svg.style.cursor = 'default';
+        }
+      }
       const hover = $('#hover');
       if (hover){
         const room = e.target.closest && e.target.closest('[data-room]');
@@ -1271,6 +1516,39 @@ export class PlanView {
     }
 
     const far = Math.hypot(e.clientX - this.drag.sx, e.clientY - this.drag.sy) >= TAP;
+
+    if (this.drag.kind === 'ref-move'){
+      if (!this.drag.moved && !far) return;
+      this.drag.moved = true;
+      const ref = this.app.store.state.plan.refImage;
+      if (!ref) return;
+      ref.x = Math.round((p.x - this.drag.ox) / 10) * 10;
+      ref.y = Math.round((p.y - this.drag.oy) / 10) * 10;
+      this.renderRef(); this.renderSel();
+      return;
+    }
+
+    if (this.drag.kind === 'ref-corner'){
+      if (!this.drag.moved && !far) return;
+      this.drag.moved = true;
+      const ref = this.app.store.state.plan.refImage;
+      if (!ref) return;
+      const init = this.drag._ref, corner = this.drag.corner;
+      const isLeft = corner === 'nw' || corner === 'sw';
+      const isTop  = corner === 'nw' || corner === 'ne';
+      const fixedX = isLeft ? init.x + init.w : init.x;
+      const fixedY = isTop  ? init.y + init.h : init.y;
+      const dx = Math.abs(p.x - fixedX);
+      const dy = Math.abs(p.y - fixedY);
+      const kx = dx / init.w, ky = dy / init.h;
+      const k = Math.max(0.02, Math.min(kx, ky));  // 保持宽高比，取更受限的一维
+      const newW = init.w * k, newH = init.h * k;
+      ref.w = newW; ref.h = newH;
+      ref.x = isLeft ? fixedX - newW : fixedX;
+      ref.y = isTop  ? fixedY - newH : fixedY;
+      this.renderRef(); this.renderSel();
+      return;
+    }
 
     if (this.drag.kind === 'measure'){
       if (far) this.drag.moved = true;
@@ -1516,6 +1794,14 @@ export class PlanView {
       }
       const g = $('#gEdit'); if (g) g.innerHTML = '';
       if (drew) this.renderAll();
+      return;
+    }
+
+    if (d.kind === 'ref-move' || d.kind === 'ref-corner'){
+      if (d.moved && d.before){
+        this.app.store.commitWith(d.before, 'edit ref image');
+        this.renderAll();
+      }
       return;
     }
 

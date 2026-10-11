@@ -147,6 +147,7 @@ export class Toolbar {
       <div class="grp" id="layers">
         <button class="btn chip" data-layer="autoDims">${tr('房间尺寸','Room dims')}</button>
         <button class="btn chip on" data-layer="labels">${tr('房间名称','Room names')}</button>
+        <button class="btn chip on" data-layer="refImage">${tr('参考图','Ref image')}</button>
         <button class="btn chip" data-layer="grid">${tr('网格','Grid')}</button>
         <button class="btn chip" data-layer="bearing">${tr('承重墙','Bearing')}</button>
       </div>
@@ -161,6 +162,9 @@ export class Toolbar {
           <button class="btn" id="loadDefault">${tr('加载内置默认户型','Load default plan')}</button>
           <button class="btn" id="loadPlan">${tr('加载户型文件…','Load .plan.json…')}</button>
           <button class="btn" id="savePlan">${tr('保存户型文件','Save .plan.json')}</button>
+          <hr>
+          <button class="btn" id="importRefImage">${tr('导入参考户型图…','Import reference image…')}</button>
+          <button class="btn" id="removeRefImage">${tr('移除参考户型图','Remove reference image')}</button>
           <hr>
           <button class="btn" id="exportJson">${tr('导出 JSON','Export JSON')}</button>
           <button class="btn" id="importJson">${tr('导入 JSON','Import JSON')}</button>
@@ -198,6 +202,8 @@ export class Toolbar {
     $('#loadDefault') && ($('#loadDefault').onclick = () => this._loadDefaultPlan());
     $('#loadPlan')    && ($('#loadPlan').onclick    = () => $('#fileIn').click());
     $('#savePlan')    && ($('#savePlan').onclick    = () => this._savePlan());
+    $('#importRefImage') && ($('#importRefImage').onclick = () => $('#refImgIn').click());
+    $('#removeRefImage') && ($('#removeRefImage').onclick = () => this._removeRefImage());
 
     $('#exportPng')  && ($('#exportPng').onclick  = () => this._exportPNG());
     $('#exportJson') && ($('#exportJson').onclick = () => this._exportJson());
@@ -448,6 +454,14 @@ export class Toolbar {
     });
     this.app.view2d.fit();
     toast(tr('已新建空白户型', 'Blank plan created'));
+  }
+
+  _removeRefImage(){
+    if (!this.app.store.state.plan.refImage) return toast(tr('当前没有参考图', 'No reference image'));
+    if (!confirm(tr('移除参考户型图？', 'Remove the reference image?'))) return;
+    this.app.select(null);
+    this.app.store.mutate('remove ref image', s => { s.plan.refImage = null; });
+    toast(tr('已移除参考图', 'Reference image removed'));
   }
 
   async _loadDefaultPlan(){

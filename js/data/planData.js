@@ -155,6 +155,7 @@ export const DEFAULT_PLAN = {
   bounds: { x:-1850, y:-1750, w:15600, h:14100 },
   origin: { x:0, y:0, note:'默认原点：左上外墙内皮交点' },
   compass: { north: 0, lat: 39.9, lng: 116.4, city: '北京' },
+  refImage: null,
   walls: WALLS,
   doors: LEGACY_DOORS.map((d, i) => legacyDoor2new(d, 'd' + i)),
   windows: LEGACY_WINDOWS.map((r, i) => legacyWindow2new(r, 'win' + i)),
@@ -195,6 +196,7 @@ export function emptyPlan(){
   p.bounds = { x:-4000, y:-4000, w:14000, h:12000 };
   p.origin = { x:0, y:0, note:'' };
   p.compass = { north: 0, lat: 39.9, lng: 116.4, city: '北京' };
+  p.refImage = null;
   return p;
 }
 

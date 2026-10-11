@@ -9,10 +9,10 @@ desktop.ini
 *.swp
 *~
 
-# 依赖与构建产物（如以后引入）
-node_modules/
-dist/
-build/
+# 依赖与构建产物（只匹配根目录，避免误伤 vendor/ 里的 build 目录）
+/node_modules/
+/dist/
+/build/
 
 # 日志与临时文件
 *.log
@@ -23,3 +23,7 @@ tmp/
 # 环境变量
 .env
 .env.*
+
+# 显式保留 vendor 目录（three.js 本地依赖）
+!vendor/
+!vendor/**
